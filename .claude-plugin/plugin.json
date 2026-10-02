@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "ax-navi",
   "displayName": "AX Navi",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "ITO/SI/SM 레거시를 위한 Claude Code 플러그인 — 19 agents + 17 workflow skills + 7 단축 별칭. 인덱스 2.0(문자열 디스패치 · 위치로 읽는 화면 · 저장소를 넘는 impact), 셸 소스 쓰기 승인 · 고친 뒤 확인 훅",
   "author": {
     "name": "Malburi",
