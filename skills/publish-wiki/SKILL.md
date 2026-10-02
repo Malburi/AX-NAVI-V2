@@ -31,7 +31,7 @@ DB 테이블(`wikihub_*`)에 같은 방식으로 쓰기 때문에, 나중에 wik
 > 돌리지 않고 `--pull`로 그 JSON을 자기 로컬 `_workspace/`의 원래 경로로
 > 받아 impact-analyzer 등 에이전트에 바로 재사용할 수 있다.
 >
-> `--pull` 직후에는 `node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/build-index.mjs" --root "[절대경로]" --check-stale`로
+> `--pull` 직후에는 `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/build-index.mjs" --root "[절대경로]" --check-stale`로
 > 받은 인덱스가 내 로컬 소스와 맞는지 확인한다 — exit 0이면 그대로 사용, exit 1이면
 > `--mode incremental` 인덱싱 1회(LLM 0, 수십 초)만 하면 된다. 발행 시점 이후 소스가
 > 바뀐 만큼만 갱신되고, analyzer가 판정한 `_workspace/index/_ai_patch.json`은 그대로 재사용된다.
@@ -119,7 +119,7 @@ wiki를 저장할 DB 엔진을 선택하세요.
 > 요청한다. 완료 알림(`암호화 완료: ...`)을 받으면 다음 단계로 진행한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/encrypt_password.py" --root "[절대경로]" --engine mssql
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wikihub_db/encrypt_password.py" --root "[절대경로]" --engine mssql
 ```
 
 `cryptography` 패키지가 없으면 스크립트가 `pip install cryptography` 안내를 내며 종료한다.
@@ -208,7 +208,7 @@ python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/encrypt_password.py" --roo
 ## Phase 3: 발행 실행
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절대경로]" `
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wikihub_db/publish.py" --root "[절대경로]" `
   --system-key "[시스템키]" --system-name "[표시이름]" `
   --component-type [backend|frontend|...] --component-key "[컴포넌트키]" `
   --publisher-company "[회사명]" --publisher-dept "[소속]" --publisher-empno "[사번]" `
@@ -216,8 +216,8 @@ python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절�
   --summary "[이번 변경 요약]" --save-env
 ```
 
-(스크립트는 플러그인 설치 루트에 있다 — PowerShell `$env:CLAUDE_PLUGIN_ROOT`, bash `$CLAUDE_PLUGIN_ROOT`.
-비어 있으면 이 SKILL.md가 위치한 플러그인 디렉터리 절대경로로 대체. cwd 상대경로
+(스크립트 경로의 `${CLAUDE_PLUGIN_ROOT}`는 이 지침을 불러올 때 플러그인 설치 절대경로로 바뀐다.
+적힌 경로를 그대로 실행하고, 스크립트를 찾으려고 디스크를 검색하지 않는다. cwd 상대경로
 `agents/lib/...` 금지.)
 
 | 옵션 | 쓰는 때 |
@@ -239,9 +239,9 @@ python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절�
 사용자가 먼저 요청할 때만 아래를 안내한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절대경로]" `
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wikihub_db/publish.py" --root "[절대경로]" `
   --grant "20231234=reader" --system-key ORDER      # 부여 (--grant-scope global 이면 전 시스템)
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절대경로]" --list-grants
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wikihub_db/publish.py" --root "[절대경로]" --list-grants
 ```
 
 `--access-control on`으로 켜는 것은 **되돌리기 쉬운 조작이지만 영향이 크다**(권한 없는 사람이
@@ -282,13 +282,13 @@ _workspace/**/*.json 6개도 함께 발행돼 다른 팀원이 --pull로 원래 
 harness의 예전 단일 테이블(`harness_wiki_pages`, `project_name` 컬럼) 데이터가 있으면 먼저 계획을 확인한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절대경로]" --migrate-v1 --dry-run
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wikihub_db/publish.py" --root "[절대경로]" --migrate-v1 --dry-run
 ```
 
 `ORDER-BACKEND` 같은 접미사 키는 `ORDER` / `backend`로 자동 분해된다. 추정이 틀린 항목만 매핑을 준다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절대경로]" --migrate-v1 --map "HRMS=HRMS:web:fullstack"
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wikihub_db/publish.py" --root "[절대경로]" --migrate-v1 --map "HRMS=HRMS:web:fullstack"
 ```
 
 원본 v1 테이블은 지우지 않는다. 확인한 뒤 사용자가 직접 정리하도록 안내한다.
@@ -296,14 +296,6 @@ python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wikihub_db/publish.py" --root "[절�
 ---
 
 ## 원칙
-
-### 저장(쓰기)은 harness에 내장, 조회·관리(읽기)는 별도 wiki-hub 서버
-대부분의 PC에는 별도 프로젝트 wiki-hub가 설치돼 있지 않다 — DB 저장 자체가 그 설치 여부에
-좌우되면 안 되므로, 스키마·버전관리 로직(`agents/lib/wikihub_db/`)을 harness 플러그인 안에
-직접 내장했다(2026-07-31 결정, 이전에는 "DB 코드는 harness 안에 두지 않는다"였음 — 이번에
-뒤집었다). wiki-hub(별도 서버, 운영 계획 수립 중)는 같은 DB를 읽어 여러 시스템을 통합
-열람·검색·버전관리하는 **조회 전용** 역할만 한다 — 스키마가 완전히 같기 때문에 harness가
-쓴 데이터를 wiki-hub가 그대로 읽을 수 있다.
 
 ### 시스템 키는 조직의 시스템 단위, 컴포넌트는 레이어 단위
 저장소 하나가 시스템 하나인 것이 아니다. 백엔드 저장소와 프론트엔드 저장소가 같은 업무 시스템이면

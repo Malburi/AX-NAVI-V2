@@ -21,8 +21,23 @@ description: 별도 저장소로 분리된 백엔드·프론트엔드(1:1) 또�
 
 ### 하네스 존재 확인
 
-`CLAUDE.md` + `.claude/` 존재 확인:
-- 없으면 → "먼저 `harness-init`으로 현재 프로젝트 하네스를 생성한 뒤 실행하세요" 안내 후 중단.
+`CLAUDE.md` + `.claude/` 존재 확인. 없으면 바로 중단하지 않고 묻는다 — 저장소 간 연결의 핵심(API 계약 매칭,
+화면 스크립트 → 짝 저장소 JS 함수)은 `pair_config.md`와 결정론적 인덱스만으로 동작하고 하네스가 필요 없다:
+
+```
+현재 프로젝트에 하네스(CLAUDE.md·.claude/)가 없습니다.
+
+1. 인덱스만 연결 (권장, AI 없음) — pair_config.md를 양쪽에 쓰고 인덱스를 다시 만들어 저장소 간 호출·API를 잇습니다.
+   CLAUDE.md 파트너 섹션·api-bridge 드리프트 검증은 건너뜁니다(나중에 harness-init 후 pair-init을 다시 실행하면 채워집니다).
+2. 중단 — 먼저 harness-init으로 하네스를 만든 뒤 다시 실행합니다.
+
+선택? (1/2)
+```
+
+| 선택 | 동작 |
+|------|------|
+| 1 | `index_only = true`. Phase 1(파트너 하네스 3지선다는 묻지 않고 "하네스 없이 진행"으로 간주) → Phase 2 → Phase 2.5 → Phase 6. Phase 3·4·5는 건너뛴다 |
+| 2 | 중단 |
 
 ### 모드 판단
 
@@ -109,7 +124,7 @@ PowerShell: `Test-Path "[파트너 경로]"` 또는 bash: `[ -d "[파트너 경�
 Agent(
   subagent_type="general-purpose",
   description="파트너 하네스 자동 생성 ([파트너 경로])",
-  prompt="skills/harness-init/SKILL.md 파일을 읽고 그 지침을 그대로 따라 harness-init을 수행하라.
+  prompt="${CLAUDE_PLUGIN_ROOT}/skills/harness-init/SKILL.md 파일을 Read로 읽고 그 지침을 그대로 따라 harness-init을 수행하라. 스킬 도구로 harness-init을 다시 부르지 말고, 지침에 적힌 서브에이전트 호출(analyzer·writer·pattern-extractor·validator·pipeline-runner)은 네가 Agent 도구로 직접 한다 — 서브에이전트 안에서도 서브에이전트를 띄울 수 있다. 읽은 지침 안의 플러그인 경로가 변수 이름 그대로 남아 있으면 그 SKILL.md가 있는 플러그인 설치 루트의 절대경로로 바꿔 쓴다(cwd 상대경로 금지).
   프로젝트 루트: [파트너 절대경로] (cwd 아님 — 이 경로 기준으로 모든 파일 읽기/쓰기 수행).
   init_layout: 'paired-roots' (멀티레포 확정 상태 — Phase -1 구성 확인 재질문 불필요, source: explicit-request로 기록).
   partner_info: { role: '[현재 프로젝트 역할과 반대]', path: '[현재 프로젝트 절대경로]', api_url: '[api_base_url]' }.
@@ -117,7 +132,7 @@ Agent(
   Phase 0 Step 2.5(Tier 확인) 질문도 이 호출에는 응답할 사용자가 없으므로 묻지 말고 override 키워드 '심층'과 동일하게 처리해 Full로 확정하고 진행(기존 harness-init 로직의 무응답 시 기본값과 동일).
   Phase 3.5(pair-init)는 이미 호출 중인 pair-init 상위 흐름과 중복이므로 스킵한다. Phase 3.6의 선택 작업 메뉴는 사용자가 없으므로 '3. 지금 안 함'으로 처리한다 — wiki도 QA도 실행하지 않고 Phase 4로 진행한다(파트너 wiki가 필요하면 연동 완료 후 그 저장소에서 generate-wiki를 따로 실행한다).
   완료 후 결과를 [파트너 절대경로]/_workspace/06_eval_report.md 및 CLAUDE.md 존재 여부로 보고하라.",
-  model="opus"
+  model="sonnet"
 )
 ```
 
@@ -242,6 +257,26 @@ partner_api_contract: [절대경로 2]/_workspace/index/api_contract.json
 전혀 없다** — hub-roots 인식은 hub(backend) 쪽에서만 필요하다.
 
 클라이언트 접근 불가 시 WARN 후 해당 클라이언트만 스킵 (다른 클라이언트·hub 설정은 계속 진행).
+
+---
+
+## Phase 2.5: 인덱스 재생성 (짝 저장소 먼저, hub 나중)
+
+인덱서는 `pair_config.md`를 읽어 두 가지를 잇는다 — ① 짝 저장소 `api_contract.json`의 엔드포인트·컨슈머 매칭,
+② 이 저장소 화면(JSP·HTML)의 이벤트·스크립트 호출이 `<script src>`로 싣는 **짝 저장소의 JS 함수**
+(짝 인덱스 `call_graph.json`의 함수 노드를 후보로 쓰고, 실제로 이어진 것만 `source: "external"` 노드로 남긴다.
+`<%= JS_PATH %>` 같은 경로 변수는 `.properties` 설정값으로 되살려 html/·mobile/ 같은 사본 중 실린 쪽을 고른다).
+그래서 **짝 저장소 인덱스가 먼저 있어야** 한다. 파트너(클라이언트)들을 먼저, hub를 마지막에 `pipeline-runner`로 실행한다:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/build-index.mjs" --root "[파트너 절대경로]"   # 파트너마다
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/build-index.mjs" --root "[hub 절대경로]"      # 마지막에
+```
+
+실행 후 hub에서 `axnavi index coverage` 진단서(또는 `agents/lib/coverage-report.mjs`)로 "대상 미발견" 건수를 연결 전과
+비교해 Phase 6에 보고한다. 짝 저장소 코드가 바뀌면 이 순서로 다시 인덱싱해야 hub 쪽 연결이 갱신된다.
+
+`index_only`면 여기서 Phase 6으로 간다.
 
 ---
 
@@ -392,9 +427,14 @@ Phase 5-A의 "프론트엔드 CLAUDE.md에 추가" 템플릿을 그대로 사용
 프론트엔드: [경로] ([스택])
 API base:  [url]
 
-API 계약 추출: [성공/실패]
+API 계약 추출: [성공/실패 / index_only라 스킵]
   엔드포인트: N개 (공개 A개 | 인증 B개)
   저장: [백엔드]/_workspace/index/api_contract.json
+
+저장소 간 연결 (Phase 2.5 인덱스 기준):
+  API 계약 매칭: N건
+  짝 저장소 JS 함수로 이어진 화면 이벤트·호출: N건
+  대상 미발견: [연결 전] → [연결 후]
 
 API 드리프트 검증: [실행됨/스킵]
   🔴 MISSING: N건

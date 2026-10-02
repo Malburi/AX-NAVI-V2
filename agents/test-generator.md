@@ -8,8 +8,6 @@ model: sonnet
 
 신규 또는 변경된 코드에 대해 *회귀를 잡는 테스트*를 생성한다. 기존 테스트 컨벤션을 그대로 따라 *프로젝트 스타일에 맞는* 테스트를 만든다.
 
-ITO/SI에서는 "테스트 없이 수정 → 사고"가 가장 흔한 패턴이다. 이 에이전트는 그 갭을 최소화한다.
-
 ---
 
 ## 팀 통신 프로토콜
@@ -19,7 +17,6 @@ ITO/SI에서는 "테스트 없이 수정 → 사고"가 가장 흔한 패턴이�
 | **수신** | (1) 대상 코드 (파일/함수/SQL) (2) `_workspace/reports/impact_<slug>.md` (있으면) (3) `.claude/patterns/pattern_profile.json`과 `test_pattern.md` (4) 프로젝트 루트 |
 | **발신** | 테스트 파일들 + `_workspace/reports/tests_<slug>.md` 요약 |
 | **작업 범위** | 테스트 골격 생성·문서화. 실제 코드(non-test) 수정 금지 |
-| **공유 작업** | `TaskUpdate` |
 
 ---
 
@@ -62,7 +59,7 @@ ITO/SI에서는 "테스트 없이 수정 → 사고"가 가장 흔한 패턴이�
 
 ### Step 1: 컨벤션 로드
 
-`pattern_profile.py validate` 후 대상 모듈·test 레이어로 프로필을 선택한다. 선택된 실제 `reference_files`와 `.claude/patterns/test_pattern.md`를 함께 읽는다. 기존 테스트가 전혀 없어 검증된 기준을 정할 수 없으면 테스트 프레임워크·명명·fixture 방식을 사용자에게 확인하기 전 생성하지 않는다.
+`pattern_profile.py validate` 후 대상 모듈·test 레이어로 프로필을 선택한다. 선택된 실제 `reference_files`와 `.claude/patterns/test_pattern.md`를 함께 읽는다. 기존 테스트가 전혀 없으면 빌드 파일(pom.xml·build.gradle·package.json·pyproject.toml 등)에 이미 선언된 테스트 의존성을 기준으로 삼는다. 그것도 없으면 임의 프레임워크를 들이지 않고 생성하지 않으며, `검증 수단 없음 — 테스트 기준 없음`으로 보고한다. 사용자에게 고르게 하지 않는다.
 
 ### Step 2: 대상 코드 분석
 
@@ -81,7 +78,7 @@ ITO/SI에서는 "테스트 없이 수정 → 사고"가 가장 흔한 패턴이�
 - Node.js: `__tests__/...` 또는 `*.test.ts`
 - .NET: 기존 솔루션의 `*.Tests` 프로젝트 아래 `*Tests.cs` (xUnit/NUnit/MSTest 중 기존 패키지만 사용)
 - WinForms/DevExpress: UI handler에서 분리된 application service는 단위 테스트, control event·Designer 결선은 UI 자동화 도구가 이미 있을 때만 생성
-- Nexacro: 기존 Nexacro 테스트 도구/런처가 있으면 XJS 테스트를 같은 위치에 추가. 없으면 임의 프레임워크를 만들지 않고 Dataset 입력·transaction callback·오류코드 시나리오를 수동 회귀 절차로 출력하고 `UNVERIFIED/HOLD` 처리
+- Nexacro: 기존 Nexacro 테스트 도구/런처가 있으면 XJS 테스트를 같은 위치에 추가. 없으면 임의 프레임워크를 만들지 않고 Dataset 입력·transaction callback·오류코드 시나리오를 회귀 절차로 출력하고 `검증 수단 없음`으로 표시
 
 기존 테스트 파일이 있으면 *덮어쓰지 않고* 새 파일 또는 새 메서드만 추가.
 

@@ -38,25 +38,20 @@ description: harness 산출물(_workspace + .claude)을 기반으로 프로젝�
 
 ---
 
-## Phase 1: 페이지 범위 확인
-
-기본적으로 발견된 데이터 기반으로 자동 결정하지만, 사용자가 범위를 지정할 수 있다.
-
----
-
 ## Phase 2: wiki_generator.py 실행
+
+페이지 범위는 기본적으로 발견된 데이터 기반으로 자동 결정하지만, 사용자가 범위를 지정할 수 있다.
 
 LLM 호출 없이, 다음 터미널 명령 한 번으로 wiki 페이지 + 인터랙티브 호출 그래프를 생성한다.
 저장은 항상 `_workspace/wiki/`다(다른 harness 산출물과 같은 재생성 가능/`.gitignore` 권장
-루트 아래로 통일 — 2026-08-14부터, 이전엔 프로젝트 루트의 별도 `wiki/` 폴더였다) — 질문 없이
-바로 진행. 여러 시스템을 DB에 모아 보고 싶으면 완료 후 Phase 3.5에서 물어보는 wiki-hub 발행을
+루트 아래로 통일) — 질문 없이 바로 진행. 여러 시스템을 DB에 모아 보고 싶으면 완료 후 Phase 3.5에서 물어보는 wiki-hub 발행을
 이용한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/wiki_generator.py" --root "[절대경로]" --wiki-dir "[절대경로]/_workspace/wiki"
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/wiki_generator.py" --root "[절대경로]" --wiki-dir "[절대경로]/_workspace/wiki"
 ```
 
-(스크립트는 플러그인 설치 루트에 있다 — PowerShell `$env:CLAUDE_PLUGIN_ROOT`, bash `$CLAUDE_PLUGIN_ROOT`. 비어 있으면 이 SKILL.md가 위치한 플러그인 디렉터리 절대경로로 대체. cwd 상대경로 `agents/lib/...` 금지.)
+(스크립트 경로의 `${CLAUDE_PLUGIN_ROOT}`는 이 지침을 불러올 때 플러그인 설치 절대경로로 바뀐다. 적힌 경로를 그대로 실행하고, 스크립트를 찾으려고 디스크를 검색하지 않는다. cwd 상대경로 `agents/lib/...` 금지.)
 
 ### 선택 — AI 해설 페이지 (사용자가 "해설 포함"·"내러티브 포함"을 요청한 경우만)
 

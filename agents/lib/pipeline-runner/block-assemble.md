@@ -1,11 +1,11 @@
-# block: assemble — 하네스 파일 조립 (Phase 2-2.3 / 2-2.5)
+# block: assemble — 하네스 파일 조립 (Phase 2-2.3)
 
 `pipeline-runner` 에이전트의 `block: assemble` 절차 상세다. 공통 규칙(스크립트 경로·`--out`/`--summary` 생략·에러 원칙·반환 원칙)은 `agents/pipeline-runner.md` 헤더에 있으며 여기서 반복하지 않는다.
 
 writer 완료 후 실행한다. 전부 결정론적 파일 조립·복사이며 LLM 호출이 없다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/skills_builder.py" --root "[root]"
+python "[plugin_root]/agents/lib/skills_builder.py" --root "[root]"
 ```
 
 이 한 번의 실행이 다음을 전부 처리한다.

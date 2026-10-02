@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "ax-navi",
   "displayName": "AX Navi",
-  "version": "0.2.0",
-  "description": "ITO/SI 조직을 위한 확장 메타 하네스 — 19 agents + 17 workflow skills + 7 단축 별칭 (근거 기반 패턴 프로필 + 적합성 게이트 + Wiki + Cross Repo)",
+  "version": "0.3.3",
+  "description": "ITO/SI/SM 레거시를 위한 Claude Code 플러그인 — 19 agents + 17 workflow skills + 7 단축 별칭. 인덱스 2.0(문자열 디스패치 · 위치로 읽는 화면 · 저장소를 넘는 impact), 셸 소스 쓰기 승인 · 고친 뒤 확인 훅",
   "author": {
     "name": "Malburi",
     "url": "https://github.com/Malburi"
@@ -11,5 +11,15 @@
   "homepage": "https://github.com/Malburi/AX-NAVI-V2",
   "repository": "https://github.com/Malburi/AX-NAVI-V2",
   "license": "MIT",
-  "keywords": ["harness", "agents", "skills", "ito", "si", "legacy", "migration", "code-analysis", "sql-review"]
+  "keywords": [
+    "harness",
+    "agents",
+    "skills",
+    "ito",
+    "si",
+    "legacy",
+    "migration",
+    "code-analysis",
+    "sql-review"
+  ]
 }

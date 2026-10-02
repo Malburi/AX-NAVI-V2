@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COMMANDS } from "../query-index.mjs";
+import { buildIndex } from "../build-index.mjs";
 
 function withIndex(fixture, fn) {
   const root = mkdtempSync(join(tmpdir(), "ax-query-"));
@@ -165,5 +166,95 @@ export async function test(register, assert) {
       assert.equal(all.items[0].column_count, 1, "목록 조회는 컬럼 수만");
       assert.ok(!all.items[0].columns, "목록 조회에 컬럼 본문이 실리면 안 된다");
     });
+  });
+
+  /*
+   * 자유 텍스트 검색.
+   *
+   * 다른 명령은 코드 식별자·파일명으로만 건다. 그래서 한국어 업무 용어로는
+   * 아무것도 안 나왔다(실측: symbol "로그인" 0건, "login" 32건).
+   * 정작 한글은 SQL 본문·설명 필드에 이미 들어 있었다 — 꾼낼 길이 없었을 뿐이다.
+   */
+  register("자유 텍스트 검색은 한글 업무 용어를 찾는다", () => {
+    withIndex({
+      symbols: { symbols: [{ id: "kr.co.demo.LoginService", type: "class", file: "src/LoginService.java", line: 1 }] },
+      sql_usage: {
+        sqls: [{ id: "MEMBER_DUP_S01", file: "query/member.xml", line: 12, type: "select",
+          text_preview: "SELECT MEM_ID FROM TB_MEMBER WHERE MEM_ID=? <description>회원아이디 중복체크</description>" }],
+        usages: [],
+      },
+    }, (root) => {
+      const hit = COMMANDS.search({ root, q: "중복체크", limit: 50 });
+      assert.equal(hit.total, 1, `한글 검색 결과: ${JSON.stringify(hit.items)}`);
+      assert.equal(hit.items[0].kind, "sql");
+      assert.equal(hit.items[0].file, "query/member.xml");
+      assert.ok(hit.items[0].snippet.includes("중복체크"), "찾은 말 주변을 보여 줘야 한다");
+
+      /* 영문 식별자도 같은 명령으로 잡힌다 — 용어마다 명령을 갈아타게 하지 않는다. */
+      assert.equal(COMMANDS.search({ root, q: "loginservice", limit: 50 }).total, 1, "대소문자 무시로 잡혀야 한다");
+    });
+  });
+
+  register("검색은 종류로 좁힐 수 있고, 없는 인덱스는 건너뛰되 밝힌다", () => {
+    withIndex({
+      symbols: { symbols: [{ id: "kr.co.demo.PayService", type: "class", file: "src/PayService.java", line: 1 }] },
+    }, (root) => {
+      const all = COMMANDS.search({ root, q: "pay", limit: 50 });
+      assert.equal(all.total, 1);
+      /* 인덱스 하나가 없다고 검색 전체를 막지 않는다. 다만 무엇이 없었는지는 밝힌다. */
+      assert.ok(all.missing_indexes.includes("call_graph"), `빠진 인덱스를 밝혀야 한다: ${JSON.stringify(all)}`);
+
+      assert.equal(COMMANDS.search({ root, q: "pay", kind: "sql", limit: 50 }).total, 0, "종류로 좁히지 않았다");
+      assert.equal(COMMANDS.search({ root, q: "pay", kind: "symbol", limit: 50 }).total, 1);
+    });
+  });
+
+  register("빈 검색어는 전수 반환이 아니라 거절이다", () => {
+    withIndex({ symbols: { symbols: [{ id: "A", type: "class", file: "a.java", line: 1 }] } }, (root) => {
+      let threw = false;
+      try { COMMANDS.search({ root, q: "  ", limit: 50 }); } catch { threw = true; }
+      assert.ok(threw, "빈 검색어가 인덱스 전체를 되돌려줌");
+    });
+  });
+
+  /*
+   * 실측(eduLms "수강신청"): 단어가 든 JSP 112개 중 화면 제목에 든 것은 9개였고 정답 화면이 전부 그 안에 있었다.
+   * 다른 기능의 컬럼 이름("수강신청일")·주석 처리한 화면 조각은 정답을 밀어내면 안 된다.
+   */
+  register("한글 검색은 용어가 나온 자리로 기능 후보 순위를 매긴다 — 제목이 컬럼 이름을 이긴다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-glossary-"));
+    const write = (rel, body) => { mkdirSync(join(root, rel, ".."), { recursive: true }); writeFileSync(join(root, rel), body, "utf8"); };
+    try {
+      write("web/front/apply/MA00001.jsp", `<%-- 프로그램명 : 수강신청 화면 --%>
+<html><head><title>수강신청 | 교육시스템</title></head><body><h2>수강신청</h2></body></html>
+`);
+      write("web/front/apply/MA00002.jsp", `<html><body><h2>수강신청 결재</h2></body></html>
+`);
+      write("web/back/grade/MA00301.jsp", `<html><body><h2>성적 조회</h2><table><tr><th>수강신청일</th><th>수강신청일</th><th>수강신청일</th><th>수강신청일</th></tr></table>
+<%-- <legend>수강신청</legend> --%></body></html>
+`);
+      write("src/app/MA00001Service.java", `package app;
+/**
+ * 수강신청 처리 서비스
+ */
+public class MA00001Service {
+  /** 수강신청 저장 */
+  public void save() {}
+}
+`);
+      write("conf/query/q-apply.xml", `<queries><query><id>MA00001_I01</id><value>INSERT INTO TB_APPL (A) VALUES (?)</value><description>수강신청 등록</description></query></queries>
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const result = COMMANDS.search({ root, q: "수강신청", limit: 5 });
+      const groups = result.features.groups.map((g) => g.dir);
+      assert.equal(groups[0], "web/front/apply", JSON.stringify(result.features.groups, null, 1));
+      assert.ok(groups.indexOf("web/back/grade") > groups.indexOf("src/app"), "컬럼 이름만 있는 화면이 클래스 설명을 이겼다");
+      assert.ok(groups.includes("conf/query/q-apply.xml"), "쿼리 설명은 파일 단위로 묶는다");
+      const grade = result.features.groups.find((g) => g.dir === "web/back/grade");
+      assert.ok(!grade.files[0].reasons.some((r) => r.includes("파일 머리말")), "주석 처리한 화면 조각을 머리말로 잡았다");
+      assert.ok(Object.keys(result).indexOf("features") < Object.keys(result).indexOf("items"), "기능 후보가 결과 맨 앞에 와야 한다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }

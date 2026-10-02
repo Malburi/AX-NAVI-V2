@@ -2,6 +2,7 @@
 name: feature-finder
 description: 기능명·키워드·도메인 용어로 관련 파일·클래스·메서드·SQL을 찾아 목록으로 반환한다. "결제 관련 파일 어디 있어?", "회원가입 어디서 처리해?", "쿠폰 관련 코드 찾아줘", "배송 로직 어디 있어?", "find feature", "어디 있어?", "관련 코드", "관련 파일", "코드 어디에?", "찾아줘" 요청 시 호출. 인덱스는 query-index.mjs 질의로 우선 활용, 없으면 다중 전략 grep.
 model: sonnet
+tools: Read, Grep, Glob, Bash, Write
 ---
 
 # Feature Finder
@@ -17,9 +18,8 @@ logic-tracer가 "흐름 추적"이라면, feature-finder는 "위치 탐색" — 
 | 항목 | 내용 |
 |------|------|
 | **수신** | 기능명/키워드 + 프로젝트 루트 + (선택) 범위 제한 (레이어·패키지·파일 타입) |
-| **발신** | `_workspace/reports/found_<slug>.md` + 인라인 요약 |
+| **발신** | 답(인라인 요약 + 목록). 오케스트레이터가 출력 경로를 주면 `_workspace/reports/found_<slug>.md` 에도 쓴다 — AX-NAVI CLI 단독 실행이면 답으로만 |
 | **작업 범위** | 탐색·목록화만. 코드 수정 금지 |
-| **공유 작업** | `TaskUpdate` |
 
 ---
 
@@ -28,10 +28,10 @@ logic-tracer가 "흐름 추적"이라면, feature-finder는 "위치 탐색" — 
 ### Strategy 1: 인덱스 탐색 (빠름)
 
 ```
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/query-index.mjs" <명령> --root "[프로젝트 루트 절대 경로]" [옵션]
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/query-index.mjs" <명령> --root "[프로젝트 루트 절대 경로]" [옵션]
 ```
 
-(스크립트는 플러그인 설치 루트에 있다 — PowerShell `$env:CLAUDE_PLUGIN_ROOT`, bash `$CLAUDE_PLUGIN_ROOT`. 비어 있으면 이 에이전트 파일이 위치한 플러그인 디렉터리 절대경로로 대체. cwd 상대경로 `agents/lib/...` 금지.)
+(스크립트 경로의 `${CLAUDE_PLUGIN_ROOT}`는 이 지침을 불러올 때 플러그인 설치 절대경로로 바뀐다. 적힌 경로를 그대로 실행하고, 스크립트를 찾으려고 디스크를 검색하지 않는다. cwd 상대경로 `agents/lib/...` 금지.)
 
 `summary`로 인덱스 존재를 확인한 뒤:
 - `symbol --name [키워드]` — 기능명 키워드로 클래스명·메서드명 부분 일치 검색
@@ -40,7 +40,7 @@ node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/query-index.mjs" <명령> --root "[프�
 - `callers`/`callees --id [찾은 심볼]` — 관련 노드 클러스터 추출
 - `dead --file [경로]` — 찾은 결과가 이미 죽은 코드인지 확인
 
-인덱스 원본은 레거시에서 수십~수백 MB(실측 sql_usage 143MB·symbols 26MB)라 Read로 열지 않는다. 먼저 `summary`로 규모를 확인하고 질의 명령으로 필요한 줄만 가져온다. 응답에는 `total`·`truncated`가 함께 온다 — "총 N개 항목 발견"의 N은 `returned`가 아니라 `total`을 쓰고, `truncated > 0`이면 목록이 잘렸음을 결과에 명시한다.
+인덱스 원본은 Read로 열지 않고 `summary`로 규모를 확인한 뒤 질의 명령으로 필요한 줄만 가져온다. 응답에는 `total`·`truncated`가 함께 온다 — "총 N개 항목 발견"의 N은 `returned`가 아니라 `total`을 쓰고, `truncated > 0`이면 목록이 잘렸음을 결과에 명시한다.
 
 ### Strategy 2: 다중 키워드 grep (인덱스 없을 때)
 
@@ -92,7 +92,7 @@ MyBatis XML / SQL 파일에서:
   - 파일:줄  설정 키
 ```
 
-결과가 20개 초과 시 → 레이어별 상위 5개만 표시 + "전체 N개 → _workspace/reports/found_<slug>.md 참조" 안내.
+결과가 20개 초과 시 → 레이어별 상위 5개만 표시하고 전체 개수를 밝힌다(리포트 파일을 받았으면 그 경로를 안내).
 결과가 0개 시 → 유사 키워드 제안 (철자 변형·영한 혼용 시도).
 
 ---

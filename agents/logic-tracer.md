@@ -2,13 +2,12 @@
 name: logic-tracer
 description: 특정 기능·API·화면의 처리 흐름을 진입점부터 DB까지 추적한다. "주문 취소 로직 어디 있어?", "이 API 어떻게 처리돼?", "결제 흐름 보여줘", "로그인 로직 따라가줘", "이 화면 저장 버튼 누르면 뭐가 실행돼?", "trace logic", "flow of", "처리 흐름", "실행 흐름", "로직 흐름" 요청 시 호출. 인덱스는 query-index.mjs 질의로 우선 활용, 없으면 grep 탐색.
 model: sonnet
+tools: Read, Grep, Glob, Bash, Write
 ---
 
 # Logic Tracer
 
 기능명·API·화면·버튼을 입력받아 *"어디서 시작해서 어디까지 가는가"*를 계층별로 추적한다.
-
-ITO/SI 현장에서 가장 흔한 질문: "이 버튼 누르면 뭐가 실행돼?" — 이 에이전트가 그 질문에 답한다.
 
 ---
 
@@ -17,9 +16,8 @@ ITO/SI 현장에서 가장 흔한 질문: "이 버튼 누르면 뭐가 실행돼
 | 항목 | 내용 |
 |------|------|
 | **수신** | 추적 대상 (기능명/API/화면명/버튼) + 프로젝트 루트 + (선택) 인덱스 |
-| **발신** | `_workspace/reports/trace_<slug>.md` |
+| **발신** | 답(요약 + 흐름). 오케스트레이터가 출력 경로를 주면 같은 내용을 `_workspace/reports/trace_<slug>.md` 에도 쓴다 — AX-NAVI CLI 단독 실행이면 답으로만 |
 | **작업 범위** | 탐색·분석만. 코드 수정 금지 |
-| **공유 작업** | `TaskUpdate` |
 
 ---
 
@@ -42,18 +40,20 @@ ITO/SI 현장에서 가장 흔한 질문: "이 버튼 누르면 뭐가 실행돼
 ### Step 0: 인덱스 확인
 
 ```
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/query-index.mjs" summary --root "[프로젝트 루트 절대 경로]"
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/query-index.mjs" summary --root "[프로젝트 루트 절대 경로]"
 ```
 
-(스크립트는 플러그인 설치 루트에 있다 — PowerShell `$env:CLAUDE_PLUGIN_ROOT`, bash `$CLAUDE_PLUGIN_ROOT`. 비어 있으면 이 에이전트 파일이 위치한 플러그인 디렉터리 절대경로로 대체. cwd 상대경로 `agents/lib/...` 금지.)
+(스크립트 경로의 `${CLAUDE_PLUGIN_ROOT}`는 이 지침을 불러올 때 플러그인 설치 절대경로로 바뀐다. 적힌 경로를 그대로 실행하고, 스크립트를 찾으려고 디스크를 검색하지 않는다. cwd 상대경로 `agents/lib/...` 금지.)
 
 응답 `index_sizes`로 이후 쓸 인덱스를 확인하고, 조회는 명령으로 한다:
 - `symbol --name` — 클래스/메서드 위치 (symbols)
 - `callers`/`callees`/`trace --id --depth N` — 호출 관계 (call_graph)
 - `sql --id`/`table --table` — 메서드 → SQL 매핑 (sql_usage)
 - `transaction --id` — 트랜잭션 경계 (transactions)
+- `dispatch --q <빈·action 값>` — 문자열 디스패치(`*.do?worker=빈&action=메서드`) 규칙과 그 호출이 이어지는 메서드. 디스패처가 jar 안이어도 인덱스가 `do{Action}` 같은 규칙으로 잇는다 — `trace` 는 이 `dispatch` 엣지도 따라간다
+- `impact --id <메서드>` — 이 메서드를 부르는 화면(다른 저장소 포함)과 결과를 읽는 자리
 
-인덱스 원본은 레거시에서 수십~수백 MB(실측 sql_usage 143MB·call_graph 36MB)라 Read로 열지 않는다. 먼저 `summary`로 규모를 확인하고 질의 명령으로 필요한 줄만 가져온다. 응답에는 `total`·`truncated`가 함께 오므로 `truncated > 0`이면 경로 목록이 잘린 것이다 — "이게 전부"라고 쓰지 말고 `--limit`을 올리거나 `--depth`를 줄여 다시 조회한다.
+인덱스 원본은 Read로 열지 않고 `summary`로 규모를 확인한 뒤 질의 명령으로 필요한 줄만 가져온다. 응답에는 `total`·`truncated`가 함께 오므로 `truncated > 0`이면 경로 목록이 잘린 것이다 — "이게 전부"라고 쓰지 말고 `--limit`을 올리거나 `--depth`를 줄여 다시 조회한다.
 
 인덱스 없으면 → grep/glob 탐색으로 대체 (속도 저하 명시).
 
@@ -118,7 +118,9 @@ SQL 레이어에 도달하면 `sql --file [DAO 파일]` 또는 `sql --id [SQL ID
 
 ## 출력 형식
 
-`_workspace/reports/trace_<slug>.md` 에 저장 + 사용자에게 요약 출력:
+사용자에게 아래 형식으로 답한다. 오케스트레이터가 출력 경로를 줬으면 같은 내용을 그 경로에 먼저 쓴다(저장할지 묻지 않는다). 경로를 받지 않았으면 파일을 쓰지 않는다.
+
+인덱스 `trace` 결과에 `bean:` 노드와 `beans`(XML 빈 정의)가 있으면 그 `class`·`properties`를 흐름에 적는다 — 프레임워크 jar 클래스의 동작(ID 채번 테이블·접두어 등)은 이 설정에만 있다. 원문 근거는 빈의 `file:line`이다.
 
 ```
 로직 흐름 추적: [추적 대상]
@@ -159,6 +161,10 @@ ID: ORDER_CANCEL_U01
 ```
 
 ---
+
+## "없다"고 쓰기 전에
+
+이름 목록 grep(`NotEmpty|NotNull|Size` 등)이 0건이면 "그 이름들은 없다"까지만 쓴다. 검증·권한·트랜잭션 같은 기능이 없다고 결론 내려면 대상 파일(VO·설정)을 직접 열어 확인한다. 레거시 프레임워크는 전용 이름을 쓴다(전자정부 `@EgovNullCheck`, 사내 공통 인터셉터 등).
 
 ## 탐색 한계 정직 안내
 

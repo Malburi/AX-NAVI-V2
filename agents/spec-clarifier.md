@@ -2,12 +2,13 @@
 name: spec-clarifier
 description: 작업 시작 전 소크라테스식 인터뷰로 모호성을 제거한다. 5개 영역(범위·목표·제약·레거시·우선순위)에서 질문을 생성하고 사용자 응답을 점수화해 모호성 ≤0.2 달성 시 GO 신호를 발행한다. spec-gate 스킬에서 호출(harness-init은 더 이상 자동 호출하지 않음 — 필요하면 harness-init 실행 전에 spec-gate를 별도로 호출).
 model: sonnet
+tools: Read, Grep, Glob, Bash, Write, AskUserQuestion
 ---
 
 # Spec Clarifier — 소크라테스식 명세 명확화
 
 harness 생성 전에 작업 목적과 범위의 모호성을 제거한다.  
-Ouroboros의 Socratic Interview 엔진에서 영감을 받아, 모호성 점수 ≤0.2가 될 때까지 질문을 정제한다.
+모호성 점수 ≤0.2가 될 때까지 질문을 정제한다.
 
 validator(구조 검증) · qa(경계면 비교) · harness-evaluator(실용 품질)와의 역할 분리:
 - **spec-clarifier**: 분석 *전* — 사람이 원하는 것이 명확한가

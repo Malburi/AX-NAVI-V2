@@ -17,8 +17,8 @@ description: 추출된 프로젝트 컨벤션에 따라 신규 기능을 스캐�
 
 생성 예정 경로의 확장자마다 `agents/lib/check-adapter-coverage.mjs`를 실행한다. 기존 파일이 아직 없더라도 같은 확장자의 `_meta.json.adapter_coverage` 항목으로 판정한다.
 
-- `FULL`만 자동 생성 가능.
-- `PARTIAL`(예: XFDL 혼합 XML/Script, 프로젝트 메타데이터)은 실제 유사 화면/Designer/설정 파일과 실행 검증 절차를 사용자가 확인할 때까지 HOLD.
+- `FULL`은 자동 생성 가능.
+- `PARTIAL`(예: XFDL 혼합 XML/Script, 프로젝트 메타데이터)은 `READ` — 실제 유사 화면·Designer·설정 파일 원문을 직접 읽어 구조를 확인한 뒤 생성한다. 사용자에게 확인을 떠넘기지 않고, 읽은 파일을 보고에 남긴다.
 - `UNSUPPORTED`는 추측 스캐폴딩 금지. 먼저 어댑터와 회귀 픽스처를 추가한다.
 
 ### pair_config 확인 (Type B 지원)
@@ -31,17 +31,17 @@ description: 추출된 프로젝트 컨벤션에 따라 신규 기능을 스캐�
 ### 패턴 로드
 
 `.claude/patterns/*.md` 확인:
-- 스켈레톤 상태 (pattern-extractor 미실행) → "패턴 추출 먼저 필요" 안내 후 pattern-extractor 호출
+- 스켈레톤 상태 (pattern-extractor 미실행) → 아래 `select`의 이웃 `reference_files`를 기준으로 진행하고 보고에 pattern-extractor 재실행을 권고한다. 이웃 파일도 없을 때만 pattern-extractor를 먼저 호출한다.
 - 본문 채워짐 → 계속 진행
 
 `.claude/patterns/pattern_profile.json`을 기계 검증한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/pattern_profile.py" validate --root "[프로젝트 루트 절대 경로]"
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/pattern_profile.py" validate --root "[프로젝트 루트 절대 경로]"
 ```
 
 - 검증 PASS → 모듈·레이어별 기준 코드 선택 가능.
-- 파일 없음·검증 FAIL → pattern-extractor를 먼저 실행하고 다시 검증. 재실패하면 추측 생성 금지 후 중단.
+- 파일 없음·검증 FAIL → `select`가 돌려준 이웃 `reference_files`(생성 위치의 같은 폴더 → 상위 폴더 같은 종류 파일)를 기준으로 진행하고, 보고에 `기준: 이웃 파일`과 pattern-extractor 재실행 권고를 남긴다. 이웃 파일도 없을 때만 pattern-extractor를 먼저 실행하고, 그래도 기준이 없으면 추측 생성 없이 중단한다.
 
 ### 분석 리포트 로드
 
@@ -78,14 +78,14 @@ python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/pattern_profile.py" validate --root "
 생성 예정 경로와 모듈이 정해지면 다음을 실행한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/pattern_profile.py" select --root "[프로젝트 루트 절대 경로]" --target "[생성 예정 상위 경로]" --module "[모듈명]" --limit 20
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/pattern_profile.py" select --root "[프로젝트 루트 절대 경로]" --target "[생성 예정 상위 경로]" --module "[모듈명]" --limit 20
 ```
 
 출력 `_workspace/reports/pattern_selection.json`에서 영향 레이어별 `preferred` 프로필과 실제 `reference_files`를 선택한다.
 
 - 동일 모듈·레이어 프로필 우선.
 - `legacy`와 `anti_pattern`은 신규 코드 기준으로 선택 금지.
-- 후보 간 규칙 충돌·LOW 신뢰도·근거 파일 부재 → 사용자에게 선택받기 전 생성 중단.
+- 후보 간 규칙 충돌·LOW 신뢰도 → 생성 위치에 가장 가까운 후보(같은 폴더 → 같은 모듈)를 고르고 이유를 보고에 남긴다. 프로필이 없으면 `select`가 돌려준 이웃 `reference_files`를 기준으로 쓴다. 이웃 파일까지 없을 때만 생성을 멈추고 pattern-extractor를 먼저 실행한다.
 - 생성 전에 선택한 기준 파일을 실제로 읽는다. Markdown 패턴만 읽고 일반적인 프레임워크 예제를 작성하지 않는다.
 
 ---
@@ -175,7 +175,7 @@ Agent(
 ```
 
 - CONFORM → 다음 단계.
-- HOLD → 충돌·의도적 차이를 사용자 확인 후 필요한 수정과 재검증.
+- HOLD → 지적된 차이를 기준 파일 원문에 맞춰 고치고 한 번 재검증. 그래도 HOLD면 사유를 보고.
 - FAIL → 생성 코드 수정 후 재검증. FAIL 상태에서는 GO 보고 금지.
 
 ### 4-2. 프로젝트 검증 명령 실행
@@ -183,18 +183,18 @@ Agent(
 `verify-target.mjs detect`로 프로젝트 검증 명령을 확보한 뒤(분석 리포트의 빌드·실행 명령과 교차 확인), 생성 범위에 필요한 항목을 `run`으로 실제 실행하고 `cmd`·`exit`·`fail_lines`를 기록한다.
 
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/verify-target.mjs" detect --root "[프로젝트 루트]" --target "[생성 대상 경로]"
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/verify-target.mjs" run --root "[프로젝트 루트]" --cmd "[고른 명령]"
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/verify-target.mjs" detect --root "[프로젝트 루트]" --target "[생성 대상 경로]"
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/verify-target.mjs" run --root "[프로젝트 루트]" --cmd "[고른 명령]"
 ```
 
-테스트 골격만 생성되고 assertion이 비어 있으면 통과 증거가 아니므로 HOLD로 표시한다. 감지 `count: 0`이면 자동 검증이 없다는 뜻이므로 수동 검증을 확보하기 전 GO로 보고하지 않는다.
+assertion이 빈 테스트 골격은 검증 증거로 세지 않는다(`검증 수단 없음`으로 취급). 바뀐 파일을 검사하는 명령이 없거나(감지 `count: 0` 포함), `run`이 `overall: "unavailable"`(exit 3, 도구 없음)이면 `검증 수단 없음`으로 밝히고, 유사 화면·설정 원문과 대조(정적 대조)해 생성 결과를 확인한다. 바뀐 파일을 검사하고 실행 가능한 명령을 실행하지 않았을 때만 `UNVERIFIED`(최소 HOLD)다.
 
 ### 4-3. 변경 안전성 평가
 
-`change-safety` 호출 (자동) — 생성 파일, 패턴 적합성 리포트, 실제 검증 명령 결과를 함께 전달해 보안·회귀 위험을 점검한다.
+`change-safety` 호출 (자동) — 생성 파일, 어댑터 판정(check-adapter-coverage 결과 JSON)과 원문 확인 목록(READ일 때 읽은 유사 화면·설정), 패턴 적합성 리포트, 검증 결과(명령·exit·overall, 검증 수단이 없으면 사유와 정적 대조)를 함께 전달해 보안·회귀 위험을 점검한다.
 
 결과:
-- GO → 패턴 CONFORM + 필수 검증 명령 exit 0 + change-safety GO가 모두 충족된 경우만 진행
+- GO → 패턴 CONFORM + (필수 검증 exit 0, 또는 검증 수단 없음 + 정적 대조) + change-safety GO. 검증 수단 없음으로 GO는 DB 스키마·트랜잭션·인증·공통 모듈 변경이 아닐 때만
 - HOLD → 보완 필요 항목 표시
 - STOP → 거의 발생 안 함 (보안 위험 자동 도입 시만)
 
@@ -239,7 +239,7 @@ GO일 때 변경된 프로젝트에서 인덱스를 incremental 모드로 갱신
 
 ### 근거 있는 컨벤션 준수
 
-선택된 모듈·레이어의 `preferred` 프로필과 실제 기준 파일을 따른다. 서로 다른 모듈의 다수 패턴을 평균내지 않는다. 패턴이 모호하거나 충돌하면 *생성 중단* 후 사용자에게 결정 요청.
+선택된 모듈·레이어의 `preferred` 프로필과 실제 기준 파일을 따른다. 서로 다른 모듈의 다수 패턴을 평균내지 않는다. 패턴이 모호하거나 충돌하면 생성 위치에 가장 가까운 기존 파일을 따르고, 무엇을 따랐는지 보고에 남긴다.
 
 ### TODO 정직 표기
 
@@ -249,6 +249,6 @@ GO일 때 변경된 프로젝트에서 인덱스를 incremental 모드로 갱신
 
 기존 파일/메서드/SQL ID와 충돌하면 *덮어쓰지 않고* 사용자에게 조정 요청.
 
-### 패턴 부재 시 거부
+### 패턴 부재 시
 
-`.claude/patterns/`가 비어 있거나 스켈레톤이면 → pattern-extractor 먼저 실행 권고. 컨벤션 없이 스캐폴딩하면 *추측에 기반한 잘못된 표준*을 도입할 위험.
+`.claude/patterns/`가 비어 있거나 스켈레톤이면 생성 위치에 가장 가까운 기존 파일(이웃 `reference_files`)을 기준으로 삼고 pattern-extractor 재실행을 권고한다. 이웃 파일까지 없으면 거부한다 — 컨벤션 없이 스캐폴딩하면 *추측에 기반한 잘못된 표준*을 도입할 위험이 있다.

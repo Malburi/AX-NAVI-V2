@@ -1,8 +1,9 @@
-﻿import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+﻿import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyAiPatch, buildIndex } from "../build-index.mjs";
 import { assessTargetCoverage } from "../adapters/registry.mjs";
+import { COMMANDS } from "../query-index.mjs";
 
 function write(root, rel, content) {
   const path = join(root, rel);
@@ -79,14 +80,43 @@ class Repository { public void remove() {} }
     }
   });
 
-  register("Lite도 AI 없이 기본 기계 인덱스를 생성한다", () => {
-    const root = mkdtempSync(join(tmpdir(), "ax-indexer-lite-"));
+  register("테스트·배포 인벤토리를 파일명·매니페스트에서 집계해 _analysis_input에 싣는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-inventory-"));
+    try {
+      write(root, "pom.xml", "<project><dependencies><dependency><artifactId>junit-jupiter</artifactId></dependency><dependency><artifactId>mockito-core</artifactId></dependency></dependencies><build><plugins><plugin><artifactId>jacoco-maven-plugin</artifactId></plugin></plugins></build></project>");
+      write(root, "src/main/java/com/acme/App.java", "package com.acme; public class App { public void run() {} }");
+      write(root, "src/test/java/com/acme/AppTest.java", "package com.acme; public class AppTest { void t() {} }");
+      write(root, "Dockerfile", "FROM eclipse-temurin:17");
+      write(root, ".github/workflows/ci.yml", "on: push");
+      write(root, "deploy/k8s/deployment.yaml", "kind: Deployment");
+      write(root, "src/main/webapp/WEB-INF/web.xml", "<web-app/>");
+      write(root, "build.sh", "mvn package");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const inv = json(root, "_analysis_input.json").evidence.test_deploy_inventory;
+      assert.equal(JSON.stringify(inv.test_frameworks.map((f) => f.name)), JSON.stringify(["JUnit", "Mockito"]));
+      assert.equal(inv.test_frameworks[0].evidence_file, "pom.xml");
+      assert.equal(inv.coverage_tools[0].name, "JaCoCo");
+      assert.equal(inv.test_file_count, 1);
+      assert.equal(inv.test_dirs.items[0], "src/test");
+      assert.equal(inv.deploy.containers.items[0], "Dockerfile");
+      assert.equal(inv.deploy.ci.items[0], ".github/workflows/ci.yml");
+      assert.equal(inv.deploy.iac.items[0], "deploy/k8s/deployment.yaml");
+      assert.equal(inv.deploy.app_servers.items[0], "src/main/webapp/WEB-INF/web.xml");
+      assert.equal(inv.deploy.build_scripts.items[0], "build.sh");
+      assert.equal(inv.deploy_file_count, 5);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("Standard도 AI 없이 기본 기계 인덱스를 생성한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-standard-"));
     try {
       write(root, "src/simple.ts", "export function hello() { return 'hello'; }\n");
-      const result = buildIndex({ root, mode: "init", tier: "Lite", config: null });
+      const result = buildIndex({ root, mode: "init", tier: "Standard", config: null });
       assert.ok(result.indexes.includes("symbols"));
       assert.ok(result.indexes.includes("call_graph"));
-      assert.equal(json(root, "_meta.json").tier, "Lite");
+      assert.equal(json(root, "_meta.json").tier, "Standard");
       assert.equal(json(root, "_meta.json").init_layout, "single-root");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -474,15 +504,15 @@ class OrderStore {
   register("대표 파일 목록 상한이 Tier에 비례한다", () => {
     const root = mkdtempSync(join(tmpdir(), "ax-indexer-repfiles-"));
     try {
-      for (let i = 0; i < 80; i += 1) {
+      for (let i = 0; i < 200; i += 1) {
         write(root, `src/mod${i}.ts`, `export function handler${i}() { return ${i}; }\n`);
       }
-      buildIndex({ root, mode: "init", tier: "Lite", config: null });
-      const lite = json(root, "_analysis_input.json").evidence;
-      assert.ok(lite.representative_files.length <= 50, `Lite 상한 50: ${lite.representative_files.length}`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const standard = json(root, "_analysis_input.json").evidence;
+      assert.ok(standard.representative_files.length <= 150, `Standard 상한 150: ${standard.representative_files.length}`);
       buildIndex({ root, mode: "init", tier: "Full", config: null });
       const full = json(root, "_analysis_input.json").evidence;
-      assert.ok(full.representative_files.length > lite.representative_files.length, `Full이 더 많은 대표 파일을 준다: ${full.representative_files.length}`);
+      assert.ok(full.representative_files.length > standard.representative_files.length, `Full이 더 많은 대표 파일을 준다: ${full.representative_files.length}`);
       assert.equal(full.representative_files_truncated, 0);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -621,6 +651,232 @@ CREATE UNIQUE INDEX IF NOT EXISTS IDX_ORDER_USER ON TBL_ORDER (USER_ID);
     }
   });
 
+  register("본문 없는 Mapper 인터페이스 메서드가 호출 종착점이 되고, 구현이 있는 인터페이스는 구현으로 간다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-interface-methods-"));
+    try {
+      write(root, "src/main/java/com/acme/SampleMapper.java", `package com.acme;
+@EgovMapper("sampleMapper")
+public interface SampleMapper {
+  void insertSample(SampleVO vo);
+  List<?> selectSampleList(SampleVO vo);
+  @Options(useGeneratedKeys = true)
+  int countSample(@Param("vo") SampleVO vo) throws Exception;
+  int MAX = 10;
+  default String label(SampleVO vo) { return helper(vo); }
+}
+`);
+      write(root, "src/main/java/com/acme/SampleService.java", `package com.acme;
+public interface SampleService {
+  void insertSample(SampleVO vo);
+  void unusedDeclaration();
+}
+`);
+      write(root, "src/main/java/com/acme/SampleServiceImpl.java", `package com.acme;
+public class SampleServiceImpl implements SampleService {
+  @Resource(name = "sampleMapper")
+  private SampleMapper sampleMapper;
+  public void insertSample(SampleVO vo) { sampleMapper.insertSample(vo); }
+  public void unusedDeclaration() {}
+}
+`);
+      write(root, "src/main/java/com/acme/SampleController.java", `package com.acme;
+@Controller
+public class SampleController {
+  @Resource(name = "sampleService")
+  private SampleService sampleService;
+  @PostMapping("/addSample.do")
+  public String addSample(SampleVO vo) { sampleService.insertSample(vo); return "ok"; }
+}
+`);
+      write(root, "src/main/java/com/acme/BaseJob.java", `package com.acme;
+public abstract class BaseJob {
+  protected abstract void doRun(String arg);
+  public void run() { doRun("x"); }
+}
+`);
+      write(root, "src/main/resources/mapper/Sample.xml", `<mapper namespace="com.acme.SampleMapper">
+  <insert id="insertSample">INSERT INTO SAMPLE (ID) VALUES (#{id})</insert>
+</mapper>`);
+
+      buildIndex({ root, mode: "init", tier: "Full", config: null });
+      const graph = json(root, "call_graph.json");
+      const mapper = json(root, "symbols.json").symbols.find((item) => item.id === "com.acme.SampleMapper");
+      assert.equal(mapper.methods.map((item) => item.name).sort().join(","), "countSample,insertSample,label,selectSampleList", JSON.stringify(mapper.methods));
+      assert.ok(mapper.methods.filter((item) => item.name !== "label").every((item) => item.abstract), "본문 없는 선언은 abstract로 표시");
+      assert.ok(!graph.nodes.some((item) => item.id.endsWith(".helper") && item.abstract), "default 메서드 본문의 return 문을 선언으로 읽지 않는다");
+      const calls = graph.edges.filter((item) => item.type === "call").map((item) => `${item.from} -> ${item.to}`);
+      assert.ok(calls.includes("com.acme.SampleServiceImpl.insertSample -> com.acme.SampleMapper.insertSample"), calls.join("\n"));
+      assert.ok(calls.includes("com.acme.SampleController.addSample -> com.acme.SampleServiceImpl.insertSample"), calls.join("\n"));
+      assert.ok(calls.includes("com.acme.BaseJob.run -> com.acme.BaseJob.doRun"), calls.join("\n"));
+      const unresolvedPath = join(root, "_workspace", "index", "_unresolved.jsonl");
+      const unresolved = existsSync(unresolvedPath) ? readFileSync(unresolvedPath, "utf8").trim() : "";
+      assert.ok(!unresolved.includes("insertSample"), `선언과 구현이 함께 있어도 모호한 호출로 남지 않는다: ${unresolved}`);
+      const deadPath = join(root, "_workspace", "index", "dead_code.json");
+      const dead = (existsSync(deadPath) ? json(root, "dead_code.json").unused_methods : []).map((item) => item.id);
+      assert.ok(!dead.includes("com.acme.SampleService.unusedDeclaration"), "본문 없는 선언은 죽은 코드 후보가 아니다");
+      const endpoint = json(root, "api_contract.json").endpoints.find((item) => item.path_pattern === "/addSample.do");
+      for (const id of [endpoint.id, "POST /addSample.do"]) {
+        const traced = COMMANDS.trace({ root, indexDir: join(root, "_workspace", "index"), id, depth: 3, limit: 20 });
+        assert.equal(traced.resolved_start, "com.acme.SampleController.addSample", `엔드포인트로 물어도 핸들러에서 시작한다: ${id}`);
+        assert.ok(traced.items.some((item) => item.path.at(-1) === "com.acme.SampleMapper.insertSample"), JSON.stringify(traced.items));
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("Spring XML 선언형 트랜잭션(tx:advice + aop:advisor)을 pointcut 에 걸리는 메서드의 경계로 만든다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-xml-tx-"));
+    try {
+      write(root, "src/main/java/com/acme/order/service/impl/OrderServiceImpl.java", `package com.acme.order.service.impl;
+public class OrderServiceImpl implements OrderService {
+  public void insertOrder(OrderVO vo) { save(vo); }
+  public OrderVO getOrder(String id) { return null; }
+  private void save(OrderVO vo) {}
+}
+`);
+      write(root, "src/main/java/com/acme/order/service/impl/OrderDaoImpl.java", `package com.acme.order.service.impl;
+public class OrderDaoImpl {
+  public void write(OrderVO vo) {}
+}
+`);
+      write(root, "src/main/java/com/acme/order/web/OrderController.java", `package com.acme.order.web;
+public class OrderController {
+  public String add(OrderVO vo) { return "ok"; }
+}
+`);
+      write(root, "src/main/java/com/acme/batch/BatchJobImpl.java", `package com.acme.batch;
+public class BatchJobImpl {
+  public void run() {}
+}
+`);
+      write(root, "src/main/resources/spring/context-transaction.xml", `<beans xmlns:tx="http://www.springframework.org/schema/tx" xmlns:aop="http://www.springframework.org/schema/aop">
+  <tx:advice id="txAdvice" transaction-manager="txManager">
+    <tx:attributes>
+      <tx:method name="get*" read-only="true"/>
+      <tx:method name="*" rollback-for="Exception"/>
+    </tx:attributes>
+  </tx:advice>
+  <aop:config>
+    <aop:pointcut id="requiredTx" expression="execution(* com.acme..impl.*Impl.*(..)) &amp;&amp; !execution(* com.acme..*DaoImpl.*(..))"/>
+    <aop:advisor advice-ref="txAdvice" pointcut-ref="requiredTx"/>
+    <!-- <aop:advisor advice-ref="txAdvice" pointcut="execution(* com.acme..web.*.*(..))"/> -->
+    <aop:advisor advice-ref="txAdvice" pointcut="bean(*Job*)"/>
+  </aop:config>
+</beans>`);
+
+      buildIndex({ root, mode: "init", tier: "Full", config: null });
+      const boundaries = json(root, "transactions.json").boundaries;
+      const byMethod = new Map(boundaries.map((item) => [item.entry_method, item]));
+      const insert = byMethod.get("com.acme.order.service.impl.OrderServiceImpl.insertOrder");
+      assert.ok(insert, JSON.stringify(boundaries));
+      assert.equal(insert.marker, "aop:advisor");
+      assert.equal(insert.propagation, "REQUIRED");
+      assert.equal(insert.rollback_for.join(","), "Exception");
+      assert.equal(insert.file, "src/main/java/com/acme/order/service/impl/OrderServiceImpl.java");
+      assert.equal(insert.config_file, "src/main/resources/spring/context-transaction.xml");
+      assert.equal(insert.config_line, 10);
+      assert.equal(byMethod.get("com.acme.order.service.impl.OrderServiceImpl.getOrder")?.read_only, true, "get* 가 * 보다 먼저 걸린다");
+      assert.ok(!byMethod.has("com.acme.order.service.impl.OrderServiceImpl.save"), "private 메서드는 프록시가 가로채지 않는다");
+      assert.ok(!byMethod.has("com.acme.order.service.impl.OrderDaoImpl.write"), "!execution(...) 으로 뺀 대상");
+      assert.ok(!byMethod.has("com.acme.order.web.OrderController.add"), "주석 처리한 advisor 는 규칙이 아니다");
+      assert.ok(!byMethod.has("com.acme.batch.BatchJobImpl.run"), "정적으로 판정할 수 없는 bean() 은 잇지 않는다");
+      const answer = COMMANDS.transaction({ root, indexDir: join(root, "_workspace", "index"), file: "OrderServiceImpl.java", limit: 10 });
+      assert.ok(answer.items.every((item) => item.config_file && item.pointcut), JSON.stringify(answer.items));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("프레임워크 타입 필드 호출을 XML 빈 노드로 잇고, trace 가 빈 정의(property)를 함께 준다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-xml-beans-"));
+    try {
+      write(root, "src/main/java/com/acme/SampleServiceImpl.java", `package com.acme;
+import org.egovframe.rte.fdl.idgnr.EgovIdGnrService;
+public class SampleServiceImpl {
+  @Resource(name = "egovIdGnrService")
+  private EgovIdGnrService idService;
+  private EgovIdGnrService plain;
+  public void insertSample() {
+    String id = idService.getNextStringId();
+    EgovIdGnrService local = null;
+    local.getNextStringId();
+  }
+}
+`);
+      write(root, "src/main/resources/spring/context-idgen.xml", `<beans>
+  <!-- <bean name="egovIdGnrService" class="com.old.Commented"/> -->
+  <bean name="egovIdGnrService,idGen" class="org.egovframe.rte.fdl.idgnr.impl.EgovTableIdGnrServiceImpl" destroy-method="destroy">
+    <property name="strategy" ref="mixPrefixSample"/>
+    <property name="table" value="IDS"/>
+    <property name="tableName"><value>SAMPLE</value></property>
+    <property name="helper">
+      <bean class="com.acme.Inner"><property name="innerOnly" value="x"/></bean>
+    </property>
+  </bean>
+  <bean id="mixPrefixSample" class="org.egovframe.rte.fdl.idgnr.impl.strategy.EgovIdGnrStrategyImpl">
+    <property name="prefix" value="SAMPLE-"/>
+    <property name="cipers" value="5"/>
+  </bean>
+</beans>`);
+
+      buildIndex({ root, mode: "init", tier: "Full", config: null });
+      const graph = json(root, "call_graph.json");
+      const bean = graph.nodes.find((item) => item.id === "bean:egovIdGnrService");
+      assert.equal(bean?.class, "org.egovframe.rte.fdl.idgnr.impl.EgovTableIdGnrServiceImpl", JSON.stringify(graph.nodes.filter((item) => item.type === "spring_bean")));
+      assert.equal(bean.line, 3);
+      assert.equal(bean.properties.map((item) => `${item.name}=${item.ref || item.value}`).join(","), "strategy=mixPrefixSample,table=IDS,tableName=SAMPLE", "중첩 빈의 property 는 바깥 빈 것이 아니다");
+      const beanCalls = graph.edges.filter((item) => item.type === "bean_call");
+      assert.equal(beanCalls.length, 1, `지역 변수 호출은 빈으로 잇지 않는다: ${JSON.stringify(beanCalls)}`);
+      assert.equal(beanCalls[0].from, "com.acme.SampleServiceImpl.insertSample");
+      assert.equal(beanCalls[0].member, "getNextStringId");
+      assert.ok(graph.edges.some((item) => item.type === "bean_ref" && item.from === "bean:egovIdGnrService" && item.to === "bean:mixPrefixSample" && item.property === "strategy"));
+      const traced = COMMANDS.trace({ root, indexDir: join(root, "_workspace", "index"), id: "SampleServiceImpl.insertSample", depth: 3, limit: 20 });
+      assert.ok(traced.items.some((item) => item.leaf.to === "bean:egovIdGnrService" && item.leaf.member === "getNextStringId"), JSON.stringify(traced.items));
+      assert.equal(traced.beans.find((item) => item.id === "bean:mixPrefixSample")?.properties.find((item) => item.name === "prefix")?.value, "SAMPLE-");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("유니코드 이스케이프 메시지 파일과 JSP 의 spring:message 참조로 화면을 한글로 찾고, 여러 낱말은 낱말마다 맞춘다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-message-terms-"));
+    try {
+      /* 화면이 쓰는 코드를 41번째 이후에 둔다 — 용어집 파일당 상한(40)과 무관하게 풀려야 한다. */
+      const filler = Array.from({ length: 45 }, (_, i) => `filler.${i}=\\uac12${String.fromCharCode(0xac00 + i)}`).join("\n");
+      write(root, "src/main/resources/message/message-common.properties", `${filler}\nbutton.create=\\ub4f1\\ub85d\ntitle.sample=\\uae30\\ubcf8 \\uac8c\\uc2dc\\ud310 \\ubaa9\\ub85d\n`);
+      write(root, "src/main/resources/message/message-common_ko.properties", `button.create=\\ub4f1\\ub85d\n`);
+      write(root, "src/main/resources/message/message-common_en.properties", `button.create=Create\n`);
+      write(root, "src/main/webapp/WEB-INF/jsp/sample/egovSampleRegister.jsp", `<%@ taglib prefix="spring" uri="http://www.springframework.org/tags" %>
+<html><head>
+<title>Sample <spring:message code="button.create" /></title>
+</head><body>
+<a href="#" onclick="sampleAdd()"><spring:message code='button.create'/></a>
+<spring:message code="\${dynamicCode}"/>
+</body></html>
+`);
+      write(root, "src/main/webapp/WEB-INF/jsp/sample/egovSampleList.jsp", `<html><head><title><spring:message code="title.sample"/></title></head><body></body></html>
+`);
+
+      buildIndex({ root, mode: "init", tier: "Full", config: null });
+      const entries = json(root, "glossary.json").entries;
+      const register = entries.filter((item) => item.file.endsWith("egovSampleRegister.jsp"));
+      assert.ok(register.some((item) => item.term === "등록" && item.kind === "title" && item.line === 3 && item.symbol === "button.create"), JSON.stringify(register));
+      assert.ok(register.some((item) => item.term === "등록" && item.kind === "label" && item.line === 5), "제목 밖의 참조는 라벨");
+      assert.equal(register.filter((item) => item.term === "등록" && item.kind === "label").length, 1, "같은 파일·종류·낱말은 한 번만");
+      assert.ok(!register.some((item) => item.term === "Create"), "_en 은 한글 라벨이 아니다");
+      assert.ok(entries.some((item) => item.file.endsWith("egovSampleList.jsp") && item.term === "기본 게시판 목록" && item.kind === "title"), "41번째 이후 코드도 풀린다");
+
+      const result = COMMANDS.search({ root, indexDir: join(root, "_workspace", "index"), q: "샘플 등록", limit: 20 });
+      assert.equal(result.features.groups[0].files[0].file, "src/main/webapp/WEB-INF/jsp/sample/egovSampleRegister.jsp", JSON.stringify(result.features));
+      assert.equal(result.features.unmatched_words.join(","), "샘플");
+      const phrase = COMMANDS.search({ root, indexDir: join(root, "_workspace", "index"), q: "등록", limit: 20 });
+      assert.ok(!phrase.features.unmatched_words, "낱말 하나면 안 맞은 낱말을 따로 알리지 않는다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   register("ASP.NET Core의 controller route·생성자 DI·트랜잭션 경계를 추출한다", () => {
     const root = mkdtempSync(join(tmpdir(), "ax-indexer-dotnet-"));
     try {
@@ -663,7 +919,7 @@ export function Order() { return <button onClick={saveOrder}>Save</button>; }
       assert.ok(edges.some((item) => item.type === "ui_event" && item.to.endsWith("MainForm.btnSave_Click")), JSON.stringify(edges));
       assert.ok(edges.some((item) => item.type === "ui_event" && item.to.endsWith("saveOrder")), JSON.stringify(edges));
       const coverage = json(root, "_meta.json").adapter_coverage;
-      assert.equal(assessTargetCoverage(coverage, "Desktop/MainForm.Designer.cs").decision, "HOLD", "generated Designer는 수동 UI 검증 전 HOLD");
+      assert.equal(assessTargetCoverage(coverage, "Desktop/MainForm.Designer.cs").decision, "READ", "generated Designer는 원문 확인 후 진행(READ)");
       assert.equal(coverage.full_files + coverage.partial_files, 2, "파일별 coverage 합계가 중복되지 않음");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -690,7 +946,7 @@ this.fnCallback = function(svcId,errCode,errMsg) {};
       assert.ok(json(root, "api_contract.json").consumers.some((item) => item.call_type === "nexacro-transaction" && item.path_pattern === "/orders/save.do"));
       assert.ok(json(root, "call_graph.json").edges.some((item) => item.type === "ui_event" && item.to.endsWith("btnSave_onclick")), "XFDL event→Script handler 연결");
       const target = assessTargetCoverage(json(root, "_meta.json").adapter_coverage, "forms/Order.xfdl");
-      assert.equal(target.decision, "HOLD", "XFDL 부분 해석은 수동 검증 전 HOLD");
+      assert.equal(target.decision, "READ", "XFDL 부분 해석은 원문 확인 후 진행(READ)");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1338,6 +1594,868 @@ class OrderDao {
       assert.equal(result.rejected, 2);
       assert.equal(result.rejected_reasons.no_client_index, 1, JSON.stringify(result));
       assert.equal(result.rejected_reasons.no_data_flow, 1, JSON.stringify(result));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("여러 줄짜리 메서드 본문의 SQL·외부 통신 사용처는 다음 메서드가 아니라 감싸는 메서드다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-enclosing-"));
+    try {
+      write(root, "src/OrderDao.java", `package com.acme;
+public class OrderDao {
+  private SqlSessionTemplate sqlSession;
+  public List list(Map param) {
+    param.put("x", 1);
+    return sqlSession.selectList("OrderMapper.list", param);
+  }
+  public void cancel(long id) {
+    String queryId = "ORDER_CANCEL_U01";
+    sqlSession.update(queryId, id);
+  }
+  public void notifyErp(long id) {
+    log.info("send");
+    WebClient.create("http://erp/api").post();
+  }
+  @KafkaListener(topics = "orders")
+  public void onMessage(String body) {
+    log.info(body);
+  }
+  public void other() {}
+}
+`);
+      write(root, "src/OrderMapper.xml", `<mapper namespace="OrderMapper">
+  <select id="list">SELECT * FROM ORDERS</select>
+</mapper>
+<queries><query><id>ORDER_CANCEL_U01</id><value>UPDATE ORDERS SET STATUS='C' WHERE ID=?</value></query></queries>
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const usages = json(root, "sql_usage.json").usages.filter((item) => item.file === "src/OrderDao.java");
+      assert.equal(usages.find((item) => item.sql_id === "OrderMapper.list")?.method, "com.acme.OrderDao.list", JSON.stringify(usages));
+      assert.equal(usages.find((item) => item.sql_id === "ORDER_CANCEL_U01")?.method, "com.acme.OrderDao.cancel", JSON.stringify(usages));
+      const io = json(root, "external_io.json").communications;
+      assert.ok(io.some((item) => item.line === 14 && item.method === "com.acme.OrderDao.notifyErp"), `본문 안 HTTP 호출: ${JSON.stringify(io)}`);
+      assert.ok(io.some((item) => item.type === "kafka_consumer" && item.method === "com.acme.OrderDao.onMessage"), `메서드 위 애너테이션: ${JSON.stringify(io)}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 실측(eduLms): <query><value>{CALL PR_X(?)}</value></query> 70건이 문장 모양 검사에 걸리지 않아
+   * sql·call_graph 어디에도 없었다. 프로시저 본체가 DB 에만 있으면 호출 엣지도 조용히 버려졌다.
+   */
+  register("쿼리 컨테이너의 프로시저 호출을 sql 에 call 로 남기고, 본체 없는 프로시저로 가는 엣지를 잇는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-call-"));
+    try {
+      write(root, "WEB-INF/config/query/q-ora.xml", `<queries>
+<query>
+  <id>COS_APPLY_PROC_I01</id>
+  <value><![CDATA[
+    {CALL PR_LS_APPLY_FRONT_PROC(?, ?, ?)}
+  ]]></value>
+</query>
+<query><id>COS_LIST_S01</id><value>SELECT * FROM TB_LS_CRS</value></query>
+</queries>
+`);
+      write(root, "src/app/ApplyService.java", `package app;
+public class ApplyService {
+  public void doApply() {
+    String queryId = "COS_APPLY_PROC_I01";
+    dao.execute(queryId);
+  }
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const sql = json(root, "sql_usage.json");
+      const call = sql.sqls.find((item) => item.id === "COS_APPLY_PROC_I01");
+      assert.equal(call?.type, "call", JSON.stringify(sql.sqls));
+      assert.equal(call?.procedure, "PR_LS_APPLY_FRONT_PROC");
+      assert.ok(sql.usages.some((item) => item.sql_id === "COS_APPLY_PROC_I01" && item.method === "app.ApplyService.doApply"), "사용처를 잃었다");
+      const graph = json(root, "call_graph.json");
+      const node = graph.nodes.find((item) => item.id === "db:PR_LS_APPLY_FRONT_PROC");
+      assert.equal(node?.type, "db_procedure", JSON.stringify(graph.nodes.map((n) => n.id)));
+      assert.equal(node?.source, "external");
+      assert.ok(graph.edges.some((item) => item.from === "app.ApplyService.doApply" && item.to === "db:PR_LS_APPLY_FRONT_PROC"), JSON.stringify(graph.edges));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 스택마다 업무명이 적히는 자리가 다르다. 실제 샘플이 없어 각 스택의 표준 형식으로 고정한다 —
+   * 현장 변형(회사별 머리말 양식 등)은 실제 소스를 받으면 이 시험에 더한다.
+   */
+  register("업무 용어 수집은 스택별 정의 자리를 제목·설명으로 잡는다 (C#·WinForms·resx·ASP·ASP.NET·Razor·Python·Nexacro·Swagger)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-terms-"));
+    try {
+      write(root, "Svc/ApplyService.cs", `// 프로그램명 : 수강신청 서비스 모듈
+using System;
+namespace Edu {
+  /// <summary>
+  /// 수강신청 처리
+  /// </summary>
+  public class ApplyService {
+    /// <summary>수강신청 저장</summary>
+    public void Save() {}
+    [Display(Name = "신청일자")]
+    public DateTime ApplyDate { get; set; }
+  }
+}
+`);
+      write(root, "Forms/FrmApply.Designer.cs", `namespace Edu {
+  partial class FrmApply {
+    private void InitializeComponent() {
+      this.lblName.Text = "신청자명";
+      this.Text = "수강신청 등록";
+    }
+  }
+}
+`);
+      write(root, "Forms/FrmApply.resx", `<root><data name="$this.Text" xml:space="preserve"><value>수강신청 등록</value></data><data name="lblMemo.Text"><value>비고란</value></data></root>
+`);
+      write(root, "web/apply.asp", `<%
+' 프로그램명 : 수강신청 목록
+Dim rs
+%>
+<html><body><h2>수강신청 목록</h2></body></html>
+`);
+      write(root, "web/Apply.aspx", `<%@ Page Title="수강신청 조회" Language="C#" %>
+<asp:Label ID="lblTerm" runat="server" Text="신청기간" />
+`);
+      write(root, "Views/Apply/Index.cshtml", `@{ ViewData["Title"] = "수강신청 현황"; }
+<h3>목록</h3>
+`);
+      write(root, "app/apply.py", `"""수강신청 모듈"""
+class ApplyView:
+    """수강신청 화면"""
+    def post(self):
+        """수강신청 저장"""
+        pass
+name = models.CharField(verbose_name="신청자 이름")
+`);
+      write(root, "nx/MA00001.xfdl", `<FDL version="2.0"><Form id="MA00001" titletext="수강신청 관리"><Layouts><Layout><Static id="st1" text="신청번호"/></Layout></Layouts></Form></FDL>
+`);
+      write(root, "src/app/ApplyController.java", `package app;
+@Tag(name = "수강신청 API")
+public class ApplyController {
+  @Operation(summary = "수강신청 등록")
+  public void create() {}
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const entries = json(root, "glossary.json").entries;
+      const has = (file, kind, term) => assert.ok(entries.some((e) => e.file === file && e.kind === kind && e.term === term), `${file} ${kind} '${term}' 없음: ${JSON.stringify(entries.filter((e) => e.file === file))}`);
+      has("Svc/ApplyService.cs", "header", "수강신청 서비스 모듈");
+      has("Svc/ApplyService.cs", "class_doc", "수강신청 처리");
+      has("Svc/ApplyService.cs", "method_doc", "수강신청 저장");
+      has("Svc/ApplyService.cs", "label", "신청일자");
+      has("Forms/FrmApply.Designer.cs", "title", "수강신청 등록");
+      has("Forms/FrmApply.Designer.cs", "label", "신청자명");
+      has("Forms/FrmApply.resx", "title", "수강신청 등록");
+      has("Forms/FrmApply.resx", "label", "비고란");
+      has("web/apply.asp", "header", "수강신청 목록");
+      has("web/Apply.aspx", "title", "수강신청 조회");
+      has("web/Apply.aspx", "label", "신청기간");
+      has("Views/Apply/Index.cshtml", "title", "수강신청 현황");
+      has("app/apply.py", "header", "수강신청 모듈");
+      has("app/apply.py", "class_doc", "수강신청 화면");
+      has("app/apply.py", "method_doc", "수강신청 저장");
+      has("app/apply.py", "label", "신청자 이름");
+      has("nx/MA00001.xfdl", "title", "수강신청 관리");
+      has("nx/MA00001.xfdl", "label", "신청번호");
+      has("src/app/ApplyController.java", "desc", "수강신청 API");
+      has("src/app/ApplyController.java", "desc", "수강신청 등록");
+      const classDoc = entries.find((e) => e.file === "Svc/ApplyService.cs" && e.kind === "class_doc");
+      assert.ok(classDoc?.symbol?.endsWith("ApplyService"), `C# 클래스 설명의 주인: ${classDoc?.symbol}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 그리드 열 ↔ DB 컬럼, XtraReports 보고서. 실제 샘플이 없어 각 라이브러리의 표준 형식으로 고정한다.
+   * 이것이 없으면 "APPL_DT 를 바꾸면 어느 화면이 영향받나"가 SQL 에서 멈춘다.
+   */
+  register("그리드 열 정의(DevExpress·WinForms·ASP.NET·IBSheet·AUIGrid·RealGrid·SBGrid·Nexacro·VB)와 XtraReports 를 컬럼·SQL 로 잇는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-grid-"));
+    try {
+      write(root, "Forms/FrmApply.Designer.cs", `partial class FrmApply {
+  private void InitializeComponent() {
+    this.colApplDt.FieldName = "APPL_DT";
+    this.colApplDt.Caption = "신청일자";
+    this.dgvCol1.DataPropertyName = "USER_NM";
+    this.dgvCol1.HeaderText = "성명";
+  }
+}
+`);
+      write(root, "Forms/FrmOld.Designer.vb", `Partial Class FrmOld
+  Private Sub InitializeComponent()
+    Me.Text = "수강 이력"
+    Me.colSeq.FieldName = "APPL_SEQ"
+    Me.colSeq.Caption = "신청순번"
+  End Sub
+End Class
+`);
+      write(root, "web/Apply.aspx", `<%@ Page Title="수강신청 조회" %>
+<dx:ASPxGridView ID="grid" runat="server"><Columns>
+  <dx:GridViewDataTextColumn FieldName="APPL_DT" Caption="신청일자" />
+</Columns></dx:ASPxGridView>
+<asp:BoundField DataField="USER_NM" HeaderText="성명" />
+`);
+      write(root, "web/js/ibsheet.js", `var cols = [
+  {Header:"신청일자", Type:"Date", SaveName:"APPL_DT", Width:80},
+  {Header:"상태|상태", Type:"Combo", SaveName:"STAT_CD"}
+];
+var option = { name: "notAGridColumn" };
+`);
+      write(root, "web/js/auigrid.js", `var columnLayout = [{ dataField: "APPL_DT", headerText: "신청일자" }];
+`);
+      write(root, "web/js/realgrid.js", `grid.setColumns([
+  { name: "applDt", fieldName: "applDt", header: { text: "신청일자" } },
+  { header: { text: "승인여부" }, name: "aprvYn", fieldName: "aprvYn" }
+]);
+`);
+      write(root, "web/js/sbgrid.js", `SBGridProperties.columns = [ {caption: ["신청일자"], ref: "APPL_DT", type: "output"} ];
+`);
+      write(root, "nx/MA00001.xfdl", `<FDL><Form id="MA00001" titletext="수강신청 관리"><Layouts><Layout><Grid id="grd"><Formats><Format id="default">
+<Band id="head"><Cell col="0" text="신청일자"/><Cell col="1" text="성명"/></Band>
+<Band id="body"><Cell col="0" text="bind:APPL_DT"/><Cell col="1" text="bind:USER_NM"/></Band>
+</Format></Formats></Grid></Layout></Layouts></Form></FDL>
+`);
+      const source = Buffer.from(`<SqlDataSource Name="sqlDataSource1"><Query Type="CustomSqlQuery" Name="Apply"><Sql>SELECT APPL_DT, USER_NM FROM TB_APPL WHERE STAT_CD = 'A'</Sql></Query><Query Type="SelectQuery" Name="Users"><Tables><Table Name="TB_USER" /></Tables></Query><Query Type="StoredProcQuery" Name="Close"><ProcName>PR_APPL_CLOSE</ProcName></Query></SqlDataSource>`).toString("base64");
+      write(root, "Reports/RptApply.repx", `<?xml version="1.0" encoding="utf-8"?>
+<XtraReportsLayoutSerializer SerializerVersion="22.1" Ref="1" ControlType="DevExpress.XtraReports.UI.XtraReport" Name="RptApply" DisplayName="수강신청 현황 보고서">
+  <Bands><Item1 Ref="2" ControlType="DetailBand"><Controls>
+    <Item1 Ref="3" ControlType="XRLabel" Text="신청일자" />
+    <Item2 Ref="4" ControlType="XRLabel"><ExpressionBindings><Item1 Ref="5" EventName="BeforePrint" PropertyName="Text" Expression="[APPL_DT]" /></ExpressionBindings></Item2>
+  </Controls></Item1></Bands>
+  <ComponentStorage><Item1 Ref="0" ObjectType="DevExpress.DataAccess.Sql.SqlDataSource,DevExpress.DataAccess" Name="sqlDataSource1" Base64="${source}" /></ComponentStorage>
+</XtraReportsLayoutSerializer>
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const columns = json(root, "ui_columns.json").columns;
+      const col = (file, field, header, lib) => assert.ok(columns.some((c) => c.file === file && c.field === field && (header === undefined || c.header === header) && c.lib === lib), `${file} ${field}/${header}/${lib} 없음: ${JSON.stringify(columns.filter((c) => c.file === file))}`);
+      col("Forms/FrmApply.Designer.cs", "APPL_DT", "신청일자", "devexpress");
+      col("Forms/FrmApply.Designer.cs", "USER_NM", "성명", "winforms");
+      col("Forms/FrmOld.Designer.vb", "APPL_SEQ", "신청순번", "devexpress");
+      col("web/Apply.aspx", "APPL_DT", "신청일자", "devexpress");
+      col("web/Apply.aspx", "USER_NM", "성명", "aspnet");
+      col("web/js/ibsheet.js", "APPL_DT", "신청일자", "ibsheet");
+      col("web/js/auigrid.js", "APPL_DT", "신청일자", "auigrid");
+      col("web/js/realgrid.js", "applDt", "신청일자", "realgrid");
+      col("web/js/realgrid.js", "aprvYn", "승인여부", "realgrid");
+      col("web/js/sbgrid.js", "APPL_DT", "신청일자", "sbgrid");
+      col("nx/MA00001.xfdl", "APPL_DT", "신청일자", "nexacro");
+      col("nx/MA00001.xfdl", "USER_NM", "성명", "nexacro");
+      col("Reports/RptApply.repx", "APPL_DT", undefined, "xtrareports");
+      assert.ok(!columns.some((c) => c.field === "notAGridColumn"), "머리 없는 name: 을 그리드 열로 잡았다");
+
+      const sqls = json(root, "sql_usage.json").sqls.filter((s) => s.file === "Reports/RptApply.repx");
+      assert.ok(sqls.some((s) => s.id === "RptApply.Apply" && s.tables.includes("TB_APPL")), `보고서 CustomSqlQuery: ${JSON.stringify(sqls)}`);
+      assert.ok(sqls.some((s) => s.id === "RptApply.Users" && s.tables.includes("TB_USER")), "보고서 SelectQuery");
+      assert.ok(sqls.some((s) => s.type === "call" && s.procedure === "PR_APPL_CLOSE"), "보고서 StoredProcQuery");
+
+      const terms = json(root, "glossary.json").entries;
+      assert.ok(terms.some((e) => e.file === "Reports/RptApply.repx" && e.kind === "title" && e.term === "수강신청 현황 보고서"), "보고서 이름을 제목으로");
+      assert.ok(terms.some((e) => e.file === "web/js/ibsheet.js" && e.kind === "label" && e.term === "신청일자" && e.symbol === "APPL_DT"), "그리드 머리를 라벨 용어로");
+      assert.ok(terms.some((e) => e.file === "Forms/FrmOld.Designer.vb" && e.kind === "title" && e.term === "수강 이력"), "VB 디자이너 창 제목");
+
+      const impact = COMMANDS.column({ root, name: "APPL_DT", limit: 50 });
+      const screenFiles = new Set(impact.screens.items.map((s) => s.file));
+      for (const file of ["Forms/FrmApply.Designer.cs", "web/Apply.aspx", "web/js/ibsheet.js", "web/js/auigrid.js", "web/js/sbgrid.js", "nx/MA00001.xfdl", "Reports/RptApply.repx", "web/js/realgrid.js"]) {
+        assert.ok(screenFiles.has(file), `APPL_DT 를 보여 주는 화면에서 ${file} 이 빠졌다: ${[...screenFiles]}`);
+      }
+      assert.equal(impact.screens.items.find((s) => s.file === "web/js/realgrid.js")?.match, "normalized", "applDt 는 밑줄·대소문자를 빼고 맞춘 것이다");
+      assert.ok(impact.sql_mentions.items.some((s) => s.id === "RptApply.Apply"), "컬럼이 보이는 SQL");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /* 실측: "인덱스갱신해줘" 뒤에 Standard 로 만든 하네스의 인덱스가 Auto 재산정으로 Full 이 됐다. */
+  register("갱신(incremental)은 Tier 를 지정하지 않으면 기존 Tier 를 유지한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-tier-"));
+    try {
+      write(root, "src/A.java", "package a;\npublic class A {\n  public void run() {}\n}\n");
+      buildIndex({ root, mode: "init", tier: "Full", config: null });
+      assert.equal(json(root, "_meta.json").tier, "Full");
+      buildIndex({ root, mode: "incremental", tier: "Auto", config: null });
+      assert.equal(json(root, "_meta.json").tier, "Full", "갱신이 사용자가 고른 Tier 를 바꿨다");
+      buildIndex({ root, mode: "incremental", tier: "Standard", config: null });
+      assert.equal(json(root, "_meta.json").tier, "Standard", "명시한 Tier 를 무시했다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("Java 호출 해석: 지역 변수 타입·외부 인터페이스 구현·정적 호출·생성자·상속 메서드", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-resolve-"));
+    try {
+      write(root, "src/m/UserSession.java", "package m;\npublic class UserSession implements User {\n  public String getLoginId() { return \"\"; }\n  public long getUserNo() { return 0; }\n}\n");
+      write(root, "src/m/StudySession.java", "package m;\npublic class StudySession {\n  public long getUserNo() { return 0; }\n}\n");
+      write(root, "src/u/Pager.java", "package u;\npublic class Pager {\n  public static int calBetweenRow(int a) { return a; }\n}\n");
+      write(root, "src/u/FrontPager.java", "package u;\npublic class FrontPager {\n  public static int calBetweenRow(int a) { return a; }\n}\n");
+      write(root, "src/u/StringSplit.java", "package u;\npublic class StringSplit {\n  public boolean hasMoreTokens() { return false; }\n}\n");
+      write(root, "src/u/ExcelRead.java", "package u;\npublic class ExcelRead {\n  public List read() { return null; }\n}\n");
+      write(root, "src/u/ExcelReader.java", "package u;\npublic class ExcelReader {\n  public List read() { return null; }\n}\n");
+      write(root, "src/ex/QueryUpdateException.java", "package ex;\npublic class QueryUpdateException extends RuntimeException {\n  public QueryUpdateException(String m) { super(m); }\n}\n");
+      write(root, "src/base/DataAccesser.java", "package base;\npublic class DataAccesser {\n  protected Object getLogger() { return null; }\n}\n");
+      write(root, "src/web/AjaxController.java", "package web;\npublic class AjaxController {\n  protected Object getLogger() { return null; }\n}\n");
+      write(root, "src/svc/BoardService.java", `package svc;
+public class BoardService extends DataAccesser {
+  private StudySession session;
+  public void doList(Param param) {
+    User user = param.getUser();
+    String id = user.getLoginId();
+    UserSession session = (UserSession) param.getSession();
+    long no = session.getUserNo();
+    int row = Pager.calBetweenRow(1);
+    StringTokenizer tok = new StringTokenizer("a,b", ",");
+    while (tok.hasMoreTokens()) { tok.nextToken(); }
+    getLogger();
+    if (row > 0) {
+      ExcelReader excel = new ExcelReader();
+      excel.read();
+    } else {
+      ExcelRead excel = new ExcelRead();
+      excel.read();
+    }
+    throw new QueryUpdateException("x");
+  }
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const edges = json(root, "call_graph.json").edges.filter((item) => item.type === "call" && item.from === "svc.BoardService.doList");
+      const to = (id) => edges.some((item) => item.to === id);
+      assert.ok(to("m.UserSession.getLoginId"), `외부 jar 인터페이스 User → 구현 UserSession: ${JSON.stringify(edges)}`);
+      assert.ok(to("m.UserSession.getUserNo") && !to("m.StudySession.getUserNo"), "지역 변수가 같은 이름의 필드를 가린다");
+      assert.ok(to("u.Pager.calBetweenRow") && !to("u.FrontPager.calBetweenRow"), "정적 호출은 클래스 이름 정확 일치");
+      assert.ok(!to("u.StringSplit.hasMoreTokens"), "JDK StringTokenizer 지역 변수를 우리 클래스로 잇지 않는다");
+      assert.ok(to("base.DataAccesser.getLogger") && !to("web.AjaxController.getLogger"), "한정자 없는 호출은 부모 클래스 메서드");
+      assert.ok(to("u.ExcelReader.read") && to("u.ExcelRead.read"), "블록마다 다른 타입의 같은 변수 이름은 가장 가까운 선언");
+      assert.ok(to("ex.QueryUpdateException.QueryUpdateException"), "new X(...)는 생성자");
+      assert.equal(json(root, "_meta.json").unresolved_count, 0, readFileSync(join(root, "_workspace", "index", "_unresolved.jsonl"), "utf8"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("JSP 화면 스크립트: 인라인 함수·javascript: 이벤트·인클루드 범위·다른 화면 함수 배제", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-jsp-script-"));
+    try {
+      write(root, "web/WEB-INF/jsp/common/incScript.jspf", "<script>\nfunction fnCommon() { alert(\"c\"); }\n</script>\n");
+      write(root, "web/WEB-INF/jsp/order/list.jsp", `<%@ include file="/WEB-INF/jsp/common/incScript.jspf" %>
+<a href="#" onclick="javascript:fnSave();">저장</a>
+<input type="button" onclick="return fnCheck()"/>
+<button onclick="self.close()">닫기</button>
+<a onclick="fnCommon()">공통</a>
+<script src="/js/common.js"></script>
+<script>
+function fnSave() {
+  <% if (admin) { %> fnCheck(); <% } %>
+  fnCommon();
+  alert("saved");
+}
+function fnCheck() { return true; }
+</script>
+`);
+      write(root, "web/WEB-INF/jsp/other/override.jsp", "<script>\nfunction alert(m) { console.log(m); }\nfunction fnCheck() { return false; }\n</script>\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const graph = json(root, "call_graph.json");
+      const list = "web.WEB-INF.jsp.order.list";
+      const common = "web.WEB-INF.jsp.common.incScript.fnCommon";
+      const triggerTargets = graph.edges.filter((item) => item.type === "markup_event").map((item) => item.to).sort().join(",");
+      assert.equal(triggerTargets, [common, `${list}.fnCheck`, `${list}.fnSave`].sort().join(","), JSON.stringify(graph.edges));
+      const calls = graph.edges.filter((item) => item.type === "call" && item.from === `${list}.fnSave`).map((item) => item.to).sort().join(",");
+      assert.equal(calls, [common, `${list}.fnCheck`].sort().join(","), "스크립틀릿 중괄호를 넘어 같은 화면·인클루드 함수로 잇고, 다른 화면의 alert·fnCheck로 잇지 않는다");
+      const unresolved = readFileSync(join(root, "_workspace", "index", "_unresolved.jsonl"), "utf8");
+      assert.ok(!/"handler_name":"(?:javascript|return|self)"/.test(unresolved), unresolved);
+      assert.equal(json(root, "_meta.json").adapter_coverage.extensions.find((item) => item.extension === ".jspf")?.files, 1, ".jspf를 인덱싱한다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("pair_config로 이은 짝 저장소의 JS 함수를 화면 이벤트·호출 후보로 쓰고, JS_PATH 설정으로 실린 사본을 고른다", () => {
+    const server = mkdtempSync(join(tmpdir(), "ax-pair-server-"));
+    const client = mkdtempSync(join(tmpdir(), "ax-pair-client-"));
+    try {
+      write(client, "html/script/js/forms.js", "function Forms() { return {}; }\n");
+      write(client, "mobile/script/js/forms.js", "function Forms() { return {}; }\n");
+      write(client, "html/script/js/back/argil_info.js", "function onViewPage(id) { location.href = '/view?id=' + id; }\n");
+      write(client, "html/script/js/unused.js", "function neverCalled() {}\n");
+      write(client, "html/script/js/back/argil_api.js", "function loadList() { return fetch(\"/argil/list.do\", { method: \"POST\" }); }\n");
+      buildIndex({ root: client, mode: "init", tier: "Standard", config: null });
+
+      write(server, "WEB-INF/config/setting.properties", "#BACK_JS_PATH=/old/js/\nBACK_JS_PATH=/html/script/js/\nTITLE=교육\n");
+      write(server, "WEB-INF/jsp/back/include/incInit.jspf", "<%\n  String CONTEXT_PATH = request.getContextPath();\n  String JS_PATH = CONTEXT_PATH + conf.getString(\"BACK_JS_PATH\");\n%>\n");
+      write(server, "WEB-INF/jsp/back/argil/list.jsp", `<%@ include file="/WEB-INF/jsp/back/include/incInit.jspf" %>
+<script src="<%= JS_PATH %>forms.js"></script>
+<script src="<%= JS_PATH %>back/argil_info.js"></script>
+<a href="#none" onclick="onViewPage('1');">보기</a>
+<script>
+function fnInit() { var f = new Forms(); }
+</script>
+`);
+      buildIndex({ root: server, mode: "init", tier: "Standard", config: null });
+      const unpaired = readFileSync(join(server, "_workspace", "index", "_unresolved.jsonl"), "utf8");
+      assert.ok(/"handler_name":"onViewPage"/.test(unpaired), "페어가 없으면 짝 저장소 함수는 대상 미발견이다");
+
+      write(server, "_workspace/pair_config.md", `# Pair Configuration\n\nproject_type: backend\npartner_type: frontend\npartner_root: ${client}\npartner_api_contract: ${join(client, "_workspace", "index", "api_contract.json")}\n`);
+      buildIndex({ root: server, mode: "init", tier: "Standard", config: null });
+      const label = client.split(/[\\/]/).at(-1);
+      const graph = json(server, "call_graph.json");
+      assert.ok(graph.edges.some((item) => item.type === "markup_event" && item.to === `ext:${label}:html.script.js.back.argil_info.onViewPage`), JSON.stringify(graph.edges));
+      assert.ok(graph.edges.some((item) => item.type === "call" && item.from.endsWith(".list.fnInit") && item.to === `ext:${label}:html.script.js.forms.Forms`), "JS_PATH=/html/script/js/로 html 사본을 고른다");
+      const external = graph.nodes.filter((item) => item.source === "external").map((item) => item.id).sort();
+      assert.equal(external.join(","), [`ext:${label}:html.script.js.back.argil_info.onViewPage`, `ext:${label}:html.script.js.forms.Forms`].sort().join(","), "이어진 짝 노드만 남긴다(mobile 사본·neverCalled 없음)");
+      const ids = new Set(graph.nodes.map((item) => item.id));
+      assert.ok(graph.edges.every((item) => ids.has(item.from) && ids.has(item.to)), "끊어진 엣지가 없다");
+      /*
+       * 짝 저장소에서 옮겨 실은 호출부는 그 저장소 기준 경로다. 실측: api-bridge 가 이것을
+       * 이 저장소에서 찾다가 "consumers 94% 오염"으로 오판했다. 파일은 external_repo_path 에 있다.
+       */
+      const contract = json(server, "api_contract.json");
+      const foreign = contract.consumers.filter((item) => item.source === "external");
+      assert.ok(foreign.length > 0, "짝 저장소 호출부가 실리지 않았다");
+      assert.ok(foreign.every((item) => item.external_repo_path === client && existsSync(join(client, item.file))), JSON.stringify(foreign));
+    } finally {
+      rmSync(server, { recursive: true, force: true });
+      rmSync(client, { recursive: true, force: true });
+    }
+  });
+
+  register("Pro*C 배치의 C 함수·호출·EXEC SQL 정적 SQL과 PL/SQL 프로시저 호출을 인덱싱한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-proc-"));
+    try {
+      write(root, "db/pkg_order.pkb", `CREATE OR REPLACE PACKAGE BODY pkg_order AS
+  PROCEDURE save_order(p_id IN NUMBER) IS
+  BEGIN
+    NULL;
+  END save_order;
+END pkg_order;
+/
+`);
+      write(root, "db/proc_audit.prc", "CREATE OR REPLACE PROCEDURE proc_audit IS\nBEGIN\n  NULL;\nEND;\n/\n");
+      write(root, "batch/order_close.pc", `#include <stdio.h>
+EXEC SQL INCLUDE SQLCA;
+
+EXEC SQL BEGIN DECLARE SECTION;
+  char v_status[10];
+  int v_cnt;
+EXEC SQL END DECLARE SECTION;
+
+static void err_exit(const char *msg)
+{
+  printf("%s\\n", msg);
+  EXEC SQL ROLLBACK WORK RELEASE;
+  exit(1);
+}
+
+int
+close_orders(int p_day)
+{
+  EXEC SQL SELECT COUNT(*) INTO :v_cnt FROM orders WHERE close_day = :p_day;
+  if (v_cnt > 0) {
+    EXEC SQL UPDATE orders SET status = 'CLOSED' WHERE close_day = :p_day;
+  }
+  EXEC SQL DECLARE c_hist CURSOR FOR SELECT h.id FROM order_hist h JOIN orders o ON h.order_id = o.id;
+  EXEC SQL EXECUTE
+    BEGIN pkg_order.save_order(:v_cnt); END;
+  END-EXEC;
+  EXEC SQL CALL proc_audit();
+  if (sqlca.sqlcode < 0) err_exit("close failed");
+  return v_cnt;
+}
+
+int main(int argc, char **argv)
+{
+  EXEC SQL CONNECT :uid;
+  close_orders(atoi(argv[1]));
+  EXEC SQL COMMIT WORK RELEASE;
+  return 0;
+}
+`);
+      write(root, "batch/other.pc", `static void err_exit(const char *msg) { exit(2); }
+int main(void) { err_exit("x"); return 0; }
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const graph = json(root, "call_graph.json");
+      const nodeIds = graph.nodes.map((item) => item.id);
+      for (const id of ["batch.order_close.close_orders", "batch.order_close.err_exit", "batch.order_close.main", "batch.other.err_exit", "batch.other.main"]) {
+        assert.ok(nodeIds.includes(id), `${id}: ${JSON.stringify(nodeIds)}`);
+      }
+      assert.ok(!nodeIds.some((id) => /\.(?:if|printf|NVL)$/.test(id)), "키워드·라이브러리 호출·SQL 함수는 함수가 아니다");
+      const hasEdge = (from, to) => graph.edges.some((item) => item.type === "call" && item.from === from && item.to === to);
+      assert.ok(hasEdge("batch.order_close.main", "batch.order_close.close_orders"), JSON.stringify(graph.edges));
+      assert.ok(hasEdge("batch.order_close.close_orders", "batch.order_close.err_exit"), "같은 파일의 static 함수로 해석한다");
+      assert.ok(hasEdge("batch.other.main", "batch.other.err_exit"));
+      assert.ok(!hasEdge("batch.order_close.close_orders", "batch.other.err_exit"), "다른 배치 파일의 동명 함수로 잇지 않는다");
+      assert.ok(hasEdge("batch.order_close.close_orders", "PKG_ORDER.SAVE_ORDER"), "EXEC SQL EXECUTE BEGIN ... END-EXEC");
+      assert.ok(hasEdge("batch.order_close.close_orders", "PROC_AUDIT"), "EXEC SQL CALL");
+      assert.ok(graph.edges.some((item) => item.type === "process_entry" && item.to === "batch.other.main"), "배치마다 있는 main은 같은 파일의 진입점이다");
+      assert.equal(json(root, "_meta.json").unresolved_count, 0, "main 진입점이 AI 판정 대기열로 가지 않는다");
+
+      const { sqls, usages } = json(root, "sql_usage.json");
+      const tables = usages.filter((item) => item.method === "batch.order_close.close_orders")
+        .flatMap((item) => sqls.find((sql) => sql.id === item.sql_id)?.tables || []).map((name) => name.toLowerCase()).sort().join(",");
+      assert.equal(tables, "order_hist,orders,orders,orders", JSON.stringify(sqls));
+      const coverage = json(root, "_meta.json").adapter_coverage;
+      assert.equal(coverage.extensions.find((item) => item.extension === ".pc")?.level, "PARTIAL");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("PowerBuilder 내보내기의 이벤트·함수·호출·임베디드 SQL·DataWindow 연결을 인덱싱한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-pb-"));
+    try {
+      write(root, "db/pkg_order.pkb", `CREATE OR REPLACE PACKAGE BODY pkg_order AS
+  PROCEDURE save_order(p_id IN NUMBER) IS
+  BEGIN
+    NULL;
+  END save_order;
+END pkg_order;
+/
+`);
+      write(root, "pb/w_order.srw", `$PBExportHeader$w_order.srw
+forward
+global type w_order from window
+end type
+type cb_save from commandbutton within w_order
+end type
+type dw_list from datawindow within w_order
+end type
+end forward
+
+global type w_order from window
+integer width = 3000
+string title = "주문 관리"
+event ue_init ( )
+event ue_reset ( )
+cb_save cb_save
+dw_list dw_list
+end type
+global w_order w_order
+
+forward prototypes
+public function integer wf_save ()
+end prototypes
+
+public function integer wf_save ();long ll_id
+ll_id = dw_list.GetItemNumber(1, "id")
+UPDATE orders SET status = 'S' WHERE id = :ll_id USING SQLCA;
+DECLARE lp_save PROCEDURE FOR pkg_order.save_order(:ll_id);
+EXECUTE lp_save;
+if dw_list.Update() = 1 then
+	f_log("saved")
+end if
+return 1
+end function
+
+event open;dw_list.SetTransObject(SQLCA)
+dw_list.Retrieve()
+this.event ue_init()
+end event
+
+event ue_init();TriggerEvent("ue_reset")
+end event
+
+event ue_reset;
+end event
+
+on w_order.create
+this.cb_save=create cb_save
+end on
+
+type cb_save from commandbutton within w_order
+integer x = 100
+string text = "저장"
+end type
+
+event clicked;string ls_path = "C:\\temp\\"
+parent.wf_save()
+SELECT COUNT(*) INTO :ll_cnt FROM order_hist WHERE id = :ll_id;
+end event
+
+type dw_list from datawindow within w_order
+string dataobject = "d_order_list"
+end type
+`);
+      write(root, "pb/d_order_list.srd", `$PBExportHeader$d_order_list.srd
+release 12;
+datawindow(units=0 )
+table(column=(type=long updatewhereclause=yes name=id dbname="orders.id" )
+ retrieve="PBSELECT( VERSION(400) TABLE(NAME=~"orders~" ) TABLE(NAME=~"customers~" ) COLUMN(NAME=~"orders.id~")) " update="orders" updatewhere=1 updatekeyinplace=no )
+`);
+      write(root, "pb/f_log.srf", `$PBExportHeader$f_log.srf
+global type f_log from function_object
+end type
+
+forward prototypes
+global subroutine f_log (string as_msg)
+end prototypes
+
+global subroutine f_log (string as_msg);INSERT INTO app_log (msg) VALUES (:as_msg);
+end subroutine
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const graph = json(root, "call_graph.json");
+      const typeOf = (id) => graph.nodes.find((item) => item.id === id)?.type;
+      assert.equal(typeOf("w_order.wf_save"), "method", JSON.stringify(graph.nodes.map((item) => item.id)));
+      assert.equal(typeOf("w_order.open"), "pb_event");
+      assert.equal(typeOf("w_order.cb_save.clicked"), "pb_event");
+      assert.equal(typeOf("f_log.f_log"), "method");
+      const hasEdge = (from, to) => graph.edges.some((item) => item.type === "call" && item.from === from && item.to === to);
+      assert.ok(hasEdge("w_order.cb_save.clicked", "w_order.wf_save"), `parent.wf_save(): ${JSON.stringify(graph.edges)}`);
+      assert.ok(hasEdge("w_order.wf_save", "f_log.f_log"), "전역 함수");
+      assert.ok(hasEdge("w_order.wf_save", "PKG_ORDER.SAVE_ORDER"), "DECLARE PROCEDURE FOR");
+      assert.ok(hasEdge("w_order.open", "w_order.ue_init"), "this.event ue_init()");
+      assert.ok(hasEdge("w_order.ue_init", "w_order.ue_reset"), "TriggerEvent(\"ue_reset\")");
+
+      const { sqls, usages } = json(root, "sql_usage.json");
+      assert.equal(sqls.find((item) => item.id === "d_order_list")?.tables.join(","), "orders,customers", JSON.stringify(sqls));
+      const usedBy = (method) => usages.filter((item) => item.method === method)
+        .flatMap((item) => (sqls.find((sql) => sql.id === item.sql_id)?.tables || []).map((table) => `${item.sql_id.includes(":update") ? "dw-update" : sqls.find((sql) => sql.id === item.sql_id)?.type}:${table.toLowerCase()}`)).sort().join(",");
+      assert.equal(usedBy("w_order.open"), "select:customers,select:orders", "dw_list.Retrieve() → dataobject d_order_list");
+      assert.equal(usedBy("w_order.wf_save"), "dw-update:orders,update:orders", JSON.stringify(usages));
+      assert.equal(usedBy("w_order.cb_save.clicked"), "select:order_hist", "경로 문자열의 \\ 뒤에서도 코드가 어긋나지 않고, INTO 호스트 변수는 테이블이 아니다");
+      assert.equal(usedBy("f_log.f_log"), "insert:app_log");
+      /* 후보가 하나도 없으면 dead_code.json 자체를 만들지 않는다. */
+      const dead = readdirSync(join(root, "_workspace", "index")).includes("dead_code.json") ? json(root, "dead_code.json").unused_methods.map((item) => item.id) : [];
+      assert.ok(!dead.some((id) => id.endsWith(".open") || id.endsWith(".clicked")), `이벤트는 런타임 진입점이다: ${JSON.stringify(dead)}`);
+      assert.equal(json(root, "_meta.json").adapter_coverage.extensions.find((item) => item.extension === ".srw")?.level, "PARTIAL");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("필드·생성자로 주입된 클라이언트의 호출 줄을 외부 통신으로 잡고 선언 줄은 뺀다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-io-client-"));
+    try {
+      write(root, "src/ErpClient.java", `package com.acme;
+import org.springframework.web.client.RestTemplate;
+@Service
+@RequiredArgsConstructor
+public class ErpClient {
+  private final RestTemplate restTemplate;
+  private final KafkaTemplate<String, Map<String, Object>> kafka;
+  public String send(long id) {
+    log.info("send");
+    return restTemplate.postForObject("http://erp/api/orders", id, String.class);
+  }
+  public void publish(Object evt) {
+    kafka.send("order-events", evt);
+  }
+}
+`);
+      write(root, "src/PayClient.cs", `public class PayClient {
+  private readonly HttpClient _http;
+  public async Task<string> Pay(int id) {
+    var res = await _http.GetAsync("https://pg/pay");
+    return "ok";
+  }
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const io = json(root, "external_io.json").communications;
+      const at = (file, line) => io.filter((item) => item.file === file && item.line === line);
+      assert.equal(at("src/ErpClient.java", 10)[0]?.method, "com.acme.ErpClient.send", JSON.stringify(io));
+      assert.equal(at("src/ErpClient.java", 10)[0]?.target, "http://erp/api/orders");
+      assert.equal(at("src/ErpClient.java", 13)[0]?.type, "kafka_producer");
+      assert.equal(at("src/ErpClient.java", 13)[0]?.target, "order-events");
+      assert.equal(at("src/PayClient.cs", 4)[0]?.method, "PayClient.Pay");
+      assert.equal(at("src/PayClient.cs", 4)[0]?.target, "https://pg/pay");
+      for (const [file, line] of [["src/ErpClient.java", 2], ["src/ErpClient.java", 6], ["src/ErpClient.java", 7], ["src/PayClient.cs", 2]]) {
+        assert.equal(at(file, line).length, 0, `import·필드 선언 줄은 통신이 아니다: ${file}:${line} ${JSON.stringify(io)}`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("iBatis sqlMap은 namespace를 붙인 id로 잇고, <procedure>는 Java→프로시저 호출 엣지가 된다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-ibatis-"));
+    try {
+      write(root, "db/pkg_order.pkb", `CREATE OR REPLACE PACKAGE BODY pkg_order AS
+  PROCEDURE save_order(p_id IN NUMBER) IS
+  BEGIN
+    NULL;
+  END save_order;
+  FUNCTION get_status(p_id IN NUMBER) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN 'N';
+  END get_status;
+END pkg_order;
+/
+`);
+      write(root, "sqlmap/Order.xml", `<sqlMap namespace="Order">
+  <select id="list" resultClass="map">SELECT * FROM ORDERS WHERE STATUS = #status#</select>
+  <procedure id="saveOrder" parameterMap="p">{call PKG_ORDER.SAVE_ORDER(?)}</procedure>
+  <select id="getStatus" parameterMap="p2">{? = call PKG_ORDER.GET_STATUS(?)}</select>
+</sqlMap>`);
+      write(root, "sqlmap/Code.xml", `<sqlMap namespace="Code">
+  <select id="codeList">SELECT * FROM CODES</select>
+  <select id="dupe">SELECT * FROM CODES</select>
+</sqlMap>`);
+      write(root, "sqlmap/Item.xml", `<sqlMap namespace="Item">
+  <select id="dupe">SELECT * FROM ITEMS</select>
+</sqlMap>`);
+      write(root, "src/OrderDao.java", `package com.acme;
+public class OrderDao extends SqlMapClientDaoSupport {
+  public List list() {
+    return getSqlMapClientTemplate().queryForList("Order.list", null);
+  }
+  public void save(Map p) {
+    getSqlMapClientTemplate().update("Order.saveOrder", p);
+  }
+  public String status(Map p) {
+    return (String) getSqlMapClientTemplate().queryForObject("Order.getStatus", p);
+  }
+  public List codes() {
+    return getSqlMapClientTemplate().queryForList("codeList", null);
+  }
+  public List dupes() {
+    return getSqlMapClientTemplate().queryForList("dupe", null);
+  }
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const { sqls, usages } = json(root, "sql_usage.json");
+      assert.equal(sqls.find((item) => item.id === "Order.list")?.statement_id, "list", JSON.stringify(sqls));
+      const methodOf = (sqlId) => usages.find((item) => item.sql_id === sqlId && item.file === "src/OrderDao.java")?.method;
+      assert.equal(methodOf("Order.list"), "com.acme.OrderDao.list", JSON.stringify(usages));
+      assert.equal(methodOf("Code.codeList"), "com.acme.OrderDao.codes", "짧은 id가 하나면 되짚는다");
+      assert.equal(methodOf("dupe"), "com.acme.OrderDao.dupes", "짧은 id가 둘 이상이면 모호하므로 그대로 둔다");
+      assert.ok(!sqls.some((item) => /saveOrder|getStatus/.test(item.id)), `프로시저 호출은 SQL이 아니다: ${JSON.stringify(sqls)}`);
+      assert.ok(!usages.some((item) => /saveOrder|getStatus/.test(item.sql_id)), "프로시저 호출은 SQL 사용처로 두 번 세지 않는다");
+      const edges = json(root, "call_graph.json").edges;
+      const hasEdge = (from, to) => edges.some((item) => item.type === "call" && item.from === from && item.to === to);
+      assert.ok(hasEdge("com.acme.OrderDao.save", "PKG_ORDER.SAVE_ORDER"), `<procedure> → 프로시저: ${JSON.stringify(edges)}`);
+      assert.ok(hasEdge("com.acme.OrderDao.status", "PKG_ORDER.GET_STATUS"), "{? = call} → 함수");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("PL/SQL 패키지·프로시저·트리거의 심볼·호출·정적 SQL과 Java→프로시저 호출을 인덱싱한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-plsql-"));
+    try {
+      write(root, "db/pkg_order.pks", `CREATE OR REPLACE PACKAGE APP.PKG_ORDER AS
+  PROCEDURE SAVE_ORDER(p_id IN NUMBER);
+  FUNCTION GET_STATUS(p_id IN NUMBER) RETURN VARCHAR2;
+END PKG_ORDER;
+/
+`);
+      write(root, "db/pkg_order.pkb", `CREATE OR REPLACE PACKAGE BODY pkg_order AS
+  PROCEDURE log_step(p_msg IN VARCHAR2);
+
+  FUNCTION get_status(p_id IN NUMBER) RETURN VARCHAR2 IS
+    v_status VARCHAR2(10);
+  BEGIN
+    SELECT status INTO v_status FROM orders WHERE id = p_id;
+    RETURN v_status;
+  END get_status;
+
+  PROCEDURE save_order(p_id IN NUMBER) IS
+    v_id NUMBER;
+  BEGIN
+    -- UPDATE old_orders SET x = 1;
+    IF get_status(p_id) = 'NEW' THEN
+      UPDATE orders SET status = 'SAVED' WHERE id = p_id;
+    END IF;
+    INSERT INTO order_hist (id, msg) VALUES (p_id, 'it''s saved; ok') RETURNING hist_id INTO v_id;
+    DELETE order_tmp WHERE id = p_id;
+    FOR r IN (SELECT o.id FROM orders o JOIN customers c ON o.cust_id = c.id) LOOP
+      NULL;
+    END LOOP;
+    EXECUTE IMMEDIATE 'UPDATE order_stats SET cnt = cnt + 1';
+    log_step('done');
+    proc_audit;
+  END save_order;
+
+  PROCEDURE log_step(p_msg IN VARCHAR2) IS
+  BEGIN
+    INSERT INTO order_log (msg) VALUES (p_msg);
+  END log_step;
+END pkg_order;
+/
+`);
+      write(root, "db/proc_audit.prc", `CREATE OR REPLACE PROCEDURE proc_audit IS
+BEGIN
+  INSERT INTO audit_log (ts) VALUES (SYSDATE);
+END;
+/
+`);
+      write(root, "db/trg_orders.trg", `CREATE OR REPLACE TRIGGER trg_orders_biu
+BEFORE INSERT OR UPDATE ON orders
+FOR EACH ROW
+BEGIN
+  pkg_order.log_step('trigger');
+END;
+/
+`);
+      write(root, "db/install.sql", `-- 시드 데이터는 사용처가 아니다
+INSERT INTO code_table VALUES ('A', 'x');
+CREATE OR REPLACE FUNCTION fn_tax(p_amt NUMBER) RETURN NUMBER AS
+BEGIN
+  RETURN p_amt * 0.1;
+END;
+/
+`);
+      write(root, "src/OrderDao.java", `package com.acme;
+public class OrderDao {
+  private SqlSessionTemplate sqlSession;
+  public void save(long id) {
+    CallableStatement cs = conn.prepareCall("{call PKG_ORDER.SAVE_ORDER(?)}");
+    cs.execute();
+  }
+  public void audit() { sqlSession.update("OrderMapper.callAudit"); }
+}
+`);
+      write(root, "src/OrderMapper.xml", `<mapper namespace="OrderMapper">
+  <update id="callAudit" statementType="CALLABLE">{call proc_audit}</update>
+</mapper>`);
+
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const symbols = json(root, "symbols.json").symbols;
+      const pkg = symbols.find((item) => item.id === "PKG_ORDER");
+      assert.equal(pkg?.type, "package", JSON.stringify(symbols));
+      assert.ok(pkg.methods.some((item) => item.id === "PKG_ORDER.SAVE_ORDER"), JSON.stringify(pkg));
+      const trigger = symbols.find((item) => item.id === "TRG_ORDERS_BIU");
+      assert.equal(trigger?.trigger_table, "ORDERS");
+      assert.equal(JSON.stringify(trigger.trigger_events), JSON.stringify(["INSERT", "UPDATE"]));
+      assert.equal(symbols.find((item) => item.id === "FN_TAX")?.type, "function", ".sql 안의 PL/SQL 단위");
+
+      const graph = json(root, "call_graph.json");
+      const nodeIds = graph.nodes.map((item) => item.id);
+      for (const id of ["PKG_ORDER.GET_STATUS", "PKG_ORDER.SAVE_ORDER", "PKG_ORDER.LOG_STEP", "PROC_AUDIT", "FN_TAX"]) {
+        assert.ok(nodeIds.includes(id), `${id} 노드: ${JSON.stringify(nodeIds)}`);
+      }
+      assert.equal(graph.nodes.filter((item) => item.id === "PKG_ORDER.LOG_STEP").length, 1, "전방 선언은 별도 노드가 아니다");
+      const hasEdge = (from, to) => graph.edges.some((item) => item.type === "call" && item.from === from && item.to === to);
+      assert.ok(hasEdge("PKG_ORDER.SAVE_ORDER", "PKG_ORDER.GET_STATUS"), `같은 패키지 호출: ${JSON.stringify(graph.edges)}`);
+      assert.ok(hasEdge("PKG_ORDER.SAVE_ORDER", "PKG_ORDER.LOG_STEP"), "전방 선언된 멤버 호출");
+      assert.ok(hasEdge("PKG_ORDER.SAVE_ORDER", "PROC_AUDIT"), "괄호 없는 프로시저 호출");
+      assert.ok(hasEdge("TRG_ORDERS_BIU", "PKG_ORDER.LOG_STEP"), "트리거 → 패키지 호출");
+      assert.ok(hasEdge("com.acme.OrderDao.save", "PKG_ORDER.SAVE_ORDER"), "JDBC prepareCall → 프로시저");
+      assert.ok(hasEdge("com.acme.OrderDao.audit", "PROC_AUDIT"), "MyBatis CALLABLE 매퍼 → 프로시저");
+
+      const { sqls, usages } = json(root, "sql_usage.json");
+      const tablesOf = (method) => usages.filter((item) => item.method === method).flatMap((item) => sqls.find((sql) => sql.id === item.sql_id)?.tables || []).map((name) => name.toLowerCase()).sort().join(",");
+      assert.equal(tablesOf("PKG_ORDER.GET_STATUS"), "orders", "SELECT INTO 변수는 테이블이 아니다");
+      assert.equal(tablesOf("PKG_ORDER.SAVE_ORDER"), "customers,order_hist,order_stats,order_tmp,orders,orders", JSON.stringify(sqls));
+      assert.equal(tablesOf("PKG_ORDER.LOG_STEP"), "order_log");
+      const allTables = sqls.flatMap((item) => item.tables || []).map((name) => name.toLowerCase());
+      assert.ok(!allTables.includes("old_orders"), "주석 처리된 SQL");
+      assert.ok(!allTables.includes("code_table"), "프로그램 단위 밖의 시드 INSERT");
+      assert.ok(!allTables.includes("v_id") && !allTables.includes("v_status"), "INTO 변수");
+
+      const coverage = json(root, "_meta.json").adapter_coverage;
+      assert.equal(coverage.extensions.find((item) => item.extension === ".pkb")?.level, "PARTIAL");
+      assert.ok(!coverage.unsupported_files.some((file) => file.endsWith(".pkb")), "더 이상 discovery-only가 아니다");
+      assert.equal(assessTargetCoverage(coverage, "db/install.sql").decision, "READ", "PL/SQL이 든 .sql은 원문 확인 후 진행(READ)");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

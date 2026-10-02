@@ -13,7 +13,7 @@ description: 페어 연동된 백엔드+프론트엔드(1:1) 또는 백엔드+�
 
 ## Phase 0: 사전 조건 확인
 
-백엔드와 선택된 모든 클라이언트에서 생성 예정 확장자별 `check-adapter-coverage.mjs`를 실행한다. 어느 한 저장소라도 PARTIAL/UNSUPPORTED이면 해당 저장소와 전체 판정은 수동 스택 검증 전까지 최소 HOLD다. 지원 수준이 다른 저장소의 GO를 합쳐 전체 GO로 올리지 않는다.
+백엔드와 선택된 모든 클라이언트에서 생성 예정 확장자별 `check-adapter-coverage.mjs`를 실행한다. PARTIAL(`READ`) 저장소는 유사 화면·설정 원문을 직접 읽어 확인한 뒤 생성한다. 어느 한 저장소라도 UNSUPPORTED이면 해당 저장소와 전체 판정은 HOLD다. 원문을 확인하지 않은 저장소의 GO를 합쳐 전체 GO로 올리지 않는다.
 
 ### 페어 설정 확인
 
@@ -50,14 +50,7 @@ description: 페어 연동된 백엔드+프론트엔드(1:1) 또는 백엔드+�
 - 백엔드와 각 `frontend_targets` 루트에서 `pattern_profile.py validate --root "[root]"`를 실행한다.
 - `.claude/patterns/pattern_profile.json`의 실제 기준 파일과 `.claude/patterns/*.md` 상세 문서를 함께 사용한다.
 
-하나라도 프로필 누락·검증 실패·스켈레톤 상태(pattern-extractor 미실행)면 경고:
-```
-[WARN] [대상] 패턴이 아직 추출되지 않았습니다.
-       실제 기준 파일이 검증되지 않아 코드 스타일 일치를 보장할 수 없습니다.
-       계속 진행할까요? (Y/N)
-```
-
-계속 진행하더라도 해당 저장소의 최종 판정은 최소 HOLD이며 GO로 승격하지 않는다.
+하나라도 프로필 누락·검증 실패·스켈레톤 상태(pattern-extractor 미실행)면 묻지 않고 그 저장소는 `select`가 돌려주는 이웃 `reference_files`를 기준으로 삼는다. 보고에 `기준: 이웃 파일`과 pattern-extractor 재실행 권고를 남긴다. 이웃 파일까지 없는 저장소만 생성을 멈추고 HOLD로 둔다.
 
 ### API 계약 로드
 
@@ -213,10 +206,10 @@ Agent(
 백엔드와 생성에 성공한 각 클라이언트에서 다음 순서를 독립적으로 실행한다:
 
 1. `pattern-conformance`: 변경 파일, `pattern_selection.json`, 실제 `reference_files`를 대조해 `CONFORM/HOLD/FAIL` 판정
-2. 해당 저장소의 실제 테스트·빌드·린트 명령 실행 — 명령과 exit code를 증거로 저장
-3. `change-safety`: 위 두 결과와 diff를 입력으로 `GO/HOLD/STOP` 판정
+2. 해당 저장소의 실제 테스트·빌드·린트 명령 실행 — 명령과 exit code를 증거로 저장(검증 수단이 없으면 사유와 정적 대조)
+3. `change-safety`: 위 두 결과, diff, 어댑터 판정(check-adapter-coverage 결과 JSON)과 원문 확인 목록(READ일 때 읽은 유사 화면·설정)을 입력으로 `GO/HOLD/STOP` 판정
 
-검증 명령 미실행은 `UNVERIFIED`이며 최소 HOLD다. 패턴 FAIL 또는 검증 명령 실패는 STOP이다.
+바뀐 파일을 검사하고 이 환경에서 실행 가능한 명령을 실행하지 않았을 때만 `UNVERIFIED`(최소 HOLD)다. 해당 명령이 없거나 `verify-target run`이 `overall: "unavailable"`(exit 3)이면 `검증 수단 없음`으로 적고 정적 대조를 한 뒤, DB 스키마·트랜잭션·인증·공통 모듈 변경이 아니면 진행한다. assertion이 빈 테스트 골격은 검증 증거로 세지 않는다. 패턴 FAIL 또는 검증 명령 실패는 STOP이다.
 
 ### API 계약 정합성 (선택된 `frontend_targets` 전체 — 병렬)
 
@@ -236,7 +229,7 @@ Agent(
 )
 ```
 
-모든 저장소의 대상 어댑터가 FULL이고, 패턴 CONFORM, 필수 검증 exit 0, change-safety GO이며 모든 클라이언트의 API 드리프트가 0건일 때만 전체 GO다. 그 외에는 가장 낮은 판정을 사용한다. GO인 저장소는 analyzer incremental로 인덱스를 갱신한 뒤 `generate-wiki`를 실행해 구조화 패턴 표와 변경된 계약을 반영한다.
+모든 저장소의 대상 어댑터가 FULL 또는 READ(원문 확인 완료)이고, 패턴 CONFORM, 필수 검증 exit 0(또는 검증 수단 없음 + 정적 대조, 위험 변경 아님), change-safety GO이며 모든 클라이언트의 API 드리프트가 0건일 때 전체 GO다. 그 외에는 가장 낮은 판정을 사용한다. GO인 저장소는 analyzer incremental로 인덱스를 갱신한 뒤 `generate-wiki`를 실행해 구조화 패턴 표와 변경된 계약을 반영한다.
 
 ---
 

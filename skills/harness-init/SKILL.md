@@ -1,26 +1,28 @@
 ---
 name: harness-init
-model: claude-sonnet-5
-description: 프로젝트를 심층 분석해 맞춤형 하네스(CLAUDE.md, 5+ 워크플로우 스킬, 도메인 에이전트, 패턴, 인덱스)를 자동 생성하는 오케스트레이터. "하네스 초기화", "하네스 만들어줘", "하네스 다시 초기화", "harness 다시 만들어줘", "프로젝트 분석해서 설정해줘", "이 프로젝트 Claude 설정해줘", "create harness", "initialize harness", "re-initialize harness", "generate project harness", "하네스 업데이트", "하네스 보완", "스킬만 다시 생성", "에이전트만 다시 생성", "validator만 다시 실행", "패턴 추출해줘", "pattern extract" 요청 시 사용. `.claude/skills/trace.md`가 없으면 자동 트리거.
+model: sonnet
+description: 프로젝트를 심층 분석해 맞춤형 하네스(CLAUDE.md, 로컬 스킬 3종, 도메인 에이전트, 패턴, 인덱스)를 자동 생성하는 오케스트레이터. "하네스 초기화", "하네스 만들어줘", "하네스 다시 초기화", "harness 다시 만들어줘", "프로젝트 분석해서 설정해줘", "이 프로젝트 Claude 설정해줘", "create harness", "initialize harness", "re-initialize harness", "generate project harness", "하네스 업데이트", "하네스 보완", "스킬만 다시 생성", "에이전트만 다시 생성", "validator만 다시 실행", "패턴 추출해줘", "pattern extract" 요청 시 사용. `.claude/skills/trace.md`가 없으면 자동 트리거.
 ---
 
 # Harness Initializer (Enhanced) — 팀 모드 오케스트레이터
 
 프로젝트 코드베이스를 심층 분석해 *수정·개발·마이그레이션 작업까지 지원하는* 맞춤형 harness를 자동 생성한다.
 
-기존 harness-new가 만들던 5종 + AX Navi가 추가하는 5종 + 인덱스 + 패턴까지 한 번에 생성.
+로컬 스킬 3종(trace/scaffolder/find-logic) + 도메인 에이전트 + 인덱스 + 패턴까지 한 번에 생성한다. 나머지 워크플로우 스킬(analyze-impact/safe-modify 등)은 플러그인 전역판을 그대로 쓴다.
 
 **실행 모드:** 에이전트 팀 (TaskCreate 의존성 + `_workspace/` 파일 기반 산출물 전달)
 
-**모델 고정:** 메인 스킬과 모든 팀원·폴백·재시도는 `claude-sonnet-5`를 사용한다. `sonnet` 별칭이나 Opus 자동 승격을 사용하지 않는다. Standard/Full은 분석 범위만 다르며 Full의 전체 Phase B와 품질 게이트는 유지한다. 모델 미지원·권한 거부·다른 모델로의 대체가 확인되면 진행을 멈추고 사용자에게 알린다. 호스트의 실제 모델 선택을 확인할 수 없으면 Sonnet 5 실행을 검증했다고 보고하지 않는다. 사용자·조직의 전역 모델 설정은 수정하지 않는다.
+**모델 고정:** 메인 스킬과 모든 팀원·폴백·재시도는 `sonnet` 별칭을 사용한다. Opus로 자동 승격하지 않는다. 실제 모델은 조직이 정한다 — 게이트웨이·클라우드 제공자 환경에서는 `ANTHROPIC_DEFAULT_SONNET_MODEL`로 지정한 모델이, 지정이 없으면 호스트의 기본 Sonnet이 쓰인다. 정식 ID를 박아 두면 그 ID를 허용하지 않는 조직에서 초기화 자체가 막히고 환경변수로도 바꿀 수 없다. Standard/Full은 분석 범위만 다르며 Full의 전체 Phase B와 품질 게이트는 유지한다. 모델 미지원·권한 거부가 확인되면 진행을 멈추고 사용자에게 알린다. 사용자·조직의 전역 모델 설정은 수정하지 않는다.
 
 **팀 구성 (확장):**
 - 필수 파이프라인: analyzer → writer → pattern-extractor + 프로필 검증 → validator
 - 품질 루프: harness-evaluator (Phase 4)
-- 온디맨드(자동 실행 안 함, Phase 3.6 메뉴에서 선택 시만 Phase 3.7에서 실행): generate-wiki, qa
+- 온디맨드(자동 실행 안 함, Phase 3.6 메뉴에서 선택 시만 Phase 3.7에서 실행): wiki(pipeline-runner `block: wiki`), qa
 
 ---
 
+> **무응답 처리 규칙**: 이 스킬의 표에 있는 "무응답" 행은 **사용자가 질문을 직접 건너뛴 경우**(질문 도구가 "사용자가 이 질문을 건너뛰었다"고 돌려줌)에만 적용한다 — 그 값은 파일에 `unconfirmed: true`로 남기고 다음 실행에서 다시 묻는다. 질문 도구가 **"답할 사람이 없는 실행"이거나 "질문 통로에 닿지 못했다"**고 돌려주면 기본값으로 넘어가지 않는다. 요청문에 그 질문의 답이 이미 있으면 그 값을 쓰고, 없으면 그 자리에서 멈춰 무엇을 물으려 했는지와 선택지를 결과에 적는다(사용자가 대화형으로 다시 실행해 답한다). 질문하고 나서 답을 기다리는 동안 임의로 다음 단계로 가지 않는다.
+>
 > **사용자 질문 언어 규칙**: 이 스킬이 `AskUserQuestion`으로 사용자에게 묻는 모든 질문은 한국어로 작성한다. `question`·`header`·각 옵션의 `label`·`description` 필드를 전부 한국어로 채운다. 아래 표의 라벨·설명 문구를 그대로 필드에 쓰고, 임의로 영어로 번역하지 않는다. `AskUserQuestion` 툴이 없는 호스트의 평문 폴백도 한국어로 출력한다. (Phase -1 구성 확인, Phase 2-0.7 Tier 확인, Phase 3.6 선택 작업 메뉴 등 모든 질문에 적용.)
 
 ---
@@ -62,7 +64,7 @@ description: 프로젝트를 심층 분석해 맞춤형 하네스(CLAUDE.md, 5+ 
 | 1차: 1:1 | `paired-roots` | 파트너 정보 수집 (아래) | Phase 0으로 진행 |
 | 1차: 기타 → 2차: 부분 범위 | `selected-paths` | root 내부 상대경로 | Phase 0으로 진행 |
 | 1차: 기타 → 2차: 허브형 | `hub-roots` | 파트너 목록 수집 — N개 (아래) | Phase 0으로 진행 |
-| 무응답·자유 텍스트로 판단 불가 | `single-root` (기본값) | 없음 | Phase 0으로 진행 |
+| 무응답(사용자가 건너뜀 — 위 "무응답 처리 규칙")·자유 텍스트로 판단 불가 | `single-root` (기본값, `unconfirmed: true`) | 없음 | Phase 0으로 진행. 답할 사람이 없는 실행이면 기본값으로 넘어가지 않고 멈춘다 |
 
 휴리스틱으로 발견한 `server`/`backend`/`client`/`frontend`/`web`/`mobile` 후보는 경로 확인 표의 제안값으로만 쓰고 사용자의 구성 선택을 자동으로 바꾸지 않는다.
 
@@ -123,7 +125,7 @@ ITO는 한 시스템에 여러 명이 붙는다. 이 단계가 없으면 **초�
 앞 표에서 "팀원이 공유 하네스를 pull한 상태"로 판정됐으면(또는 인덱스가 이미 있으면) **전체 초기화를 하지 않는다.** 대신:
 
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/build-index.mjs" --root "[절대경로]" --check-stale
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/build-index.mjs" --root "[절대경로]" --check-stale
 ```
 
 | exit | 의미 | 동작 |
@@ -133,7 +135,7 @@ node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/build-index.mjs" --root "[절대경로]
 
 두 경우 모두 **LLM 파이프라인(2-1~2-5)을 실행하지 않는다.** analyzer·writer·pattern-extractor의 산출물은 이미 `CLAUDE.md`·`.claude/`에 커밋돼 있고, 인덱스는 결정론적이라 각자 로컬에서 다시 만드는 편이 싸다(수십 초, LLM 0). 사용자가 명시적으로 "하네스 다시 초기화"를 요청한 경우에만 전체 파이프라인으로 간다.
 
-> 인덱스 자체를 커밋할지는 팀이 정한다. 커밋하면 팀원은 위 `--check-stale`이 exit 0을 내는 동안 인덱싱조차 하지 않는다. 인덱스는 이제 이식 가능하다 — `source_root`가 `.`이고, 경로는 전부 루트 기준 상대경로에 슬래시 정규화이며, 줄바꿈(CRLF/LF)과 OS 로케일에 따라 내용이 달라지지 않는다(2026-08-16 수정). 크기가 부담되면 커밋하지 않아도 되고, 그때는 팀원이 수십 초짜리 인덱싱 한 번을 더 할 뿐이다.
+> 인덱스 자체를 커밋할지는 팀이 정한다. 커밋하면 팀원은 위 `--check-stale`이 exit 0을 내는 동안 인덱싱조차 하지 않는다. 인덱스는 이식 가능하다 — `source_root`가 `.`이고, 경로는 전부 루트 기준 상대경로에 슬래시 정규화이며, 줄바꿈(CRLF/LF)과 OS 로케일에 따라 내용이 달라지지 않는다. 크기가 부담되면 커밋하지 않아도 되고, 그때는 팀원이 수십 초짜리 인덱싱 한 번을 더 할 뿐이다.
 >
 > **반드시 커밋해야 하는 것은 인덱스가 아니라 LLM 산출물이다** — `_workspace/index/_ai_patch.json`(analyzer가 미해결 관계를 판정한 결과)은 다시 만들려면 LLM 분석을 다시 돌려야 한다. 이 파일이 `.gitignore`의 `_workspace/`에 걸려 버려지고 있지 않은지 Phase 3 보고에서 확인시킨다.
 >
@@ -148,13 +150,13 @@ node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/build-index.mjs" --root "[절대경로]
 | "빠르게"·"간단히"·"빠른"·"quick"·"fast" | **Standard** |
 | "깊게"·"심층"·"마이그레이션"·"레거시"·"전체"·"migration"·"legacy"·"deep" | **Full** |
 
-> Lite Tier는 2026-07-23 폐지됨 — 인덱스 없는 하네스는 후속 스킬(analyze-impact 등)이 동작하지 않아 실효가 없었다. Tier는 Standard/Full 2단계만 존재하며 기본은 Full이다.
+> Tier는 Standard/Full 2단계만 존재하며 기본은 Full이다. 인덱스 없는 하네스는 후속 스킬(analyze-impact 등)이 동작하지 않으므로 인덱스를 생략하는 Tier는 없다.
 
 **② override 없으면 기본 Full — 단, 확인은 인덱싱 뒤에 한다(2-0.7):**
 
 기본 Tier는 **Full**이다. 레거시 유지보수는 얕은 분석이 놓치는 위험(미해결 관계·인증 우회·트랜잭션 경계)이 재작업 비용보다 크다는 전제.
 
-과거에는 여기서 곧바로 "Standard로 낮출까요?"를 물었는데, **이 시점에는 물어볼 근거가 없었다** — 프로젝트 규모를 아직 모르므로 사용자도 판단할 수 없고, 결국 "돌려봐야 얼마 드는지 아는" 상태로 90분·한도 40%를 쓰게 됐다. 인덱싱(2-0.5)은 LLM을 쓰지 않고 수십 초면 끝나면서 규모를 정확히 알려주므로, **확인은 인덱싱 직후 2-0.7에서 실제 견적과 함께** 한다.
+이 시점에는 프로젝트 규모를 아직 모르므로 사용자도 판단할 수 없어 Tier를 묻지 않는다. 인덱싱(2-0.5)은 LLM을 쓰지 않고 수십 초면 끝나면서 규모를 정확히 알려주므로, **확인은 인덱싱 직후 2-0.7에서 실제 견적과 함께** 한다.
 
 override가 있으면 그 값을 그대로 확정하고 2-0.7의 질문을 건너뛴다. 결정된 Tier는 `_workspace/00_init_scope.md`의 "기계 실행 값" 섹션에 `- tier: Standard | Full` 행으로 기록한다. 이 질문은 초기 실행/재초기화당 1회만 하며, 부분 재실행·인덱스 리프레시는 `00_init_scope.md`의 `tier:` 값을 재사용해 다시 묻지 않는다(값이 없으면 그때만 다시 묻는다).
 
@@ -162,8 +164,8 @@ override가 있으면 그 값을 그대로 확정하고 2-0.7의 질문을 건�
 
 | Tier | 실행 구성 | 스킵 항목 |
 |------|---------|---------|
-| **Standard** | analyzer(init, 스택 해당 Phase B만) → writer → pattern(병렬) → validator. 모두 Sonnet 5 | — |
-| **Full** | 전체 파이프라인·전체 분석 범위 유지. 모두 Sonnet 5 | — |
+| **Standard** | analyzer(init, 스택 해당 Phase B만) → writer → pattern(병렬) → validator. 모두 sonnet | — |
+| **Full** | 전체 파이프라인·전체 분석 범위 유지. 모두 sonnet | — |
 
 wiki·QA는 Tier와 무관하게 두 Tier 모두 자동 실행에서 스킵되며, Phase 3.6 선택 작업 메뉴에서 사용자가 고를 때만 Phase 3.7에서 실행된다(위 표에는 포함하지 않음).
 
@@ -232,17 +234,17 @@ QA(`T-Q`)와 wiki(`T-WIKI`)는 Tier와 무관하게 이 초기 작업 그래프�
 
 **상태 전이는 모든 단계에 적용한다** — 각 절을 시작할 때 해당 작업을 `TaskUpdate`로 `in_progress`, 서브에이전트 반환을 확인한 뒤 `completed`로 갱신한다. 예외 없이 2-0.5(`T-I`)부터 2-5(`T-E`)까지, 온디맨드로 실행되는 `T-WIKI`·`T-Q`와 Phase 4의 `-RETRY`·`-PATCH`·`-RECHECK` 작업도 같다. 이 갱신이 빠지면 사용자 화면에는 작업 6개가 계속 pending으로 남아, 진행 표시를 위해 붙여 둔 한글 제목이 아무 의미가 없어진다. 스킵된 단계(산출물이 이미 있어 건너뛴 경우)는 `completed`로 닫고 스킵 사유를 Phase 3 보고에 남긴다.
 
-**모든 `Agent()` 호출은 `subagent_type="ax-navi:[에이전트 이름]"`으로 발행한다.** 2026-08-16 이전에는 분석·생성·판정 역할을 전부 `general-purpose`로 불렀는데, 그러면 서브에이전트가 자기 지침 파일을 **직접 `Read`로 읽어야** 했다 — `agents/analyzer.md` 하나가 22K 토큰이고, 파일 위치를 찾느라 Glob·Grep이 덧붙는 경우도 많았다. 네임스페이스로 부르면 같은 지침이 서브에이전트의 시스템 프롬프트로 자동 로드되므로 그 읽기가 통째로 사라지고, 프롬프트에는 인자(루트 경로·mode·tier·입출력 파일)만 남긴다. 초기화 1회 기준 이 변경만으로 지침 재적재가 약 70K 토큰 줄어든다.
+**모든 `Agent()` 호출은 `subagent_type="ax-navi:[에이전트 이름]"`으로 발행한다.** 네임스페이스로 부르면 에이전트 지침이 서브에이전트의 시스템 프롬프트로 자동 로드되므로 서브에이전트가 지침 파일을 직접 읽지 않고, 프롬프트에는 인자(루트 경로·mode·tier·입출력 파일)만 남긴다.
 
 `description` 필드에는 계속 `[task-id] · [실제 에이전트 이름] · 한글 목적`을 그대로 넣는다 — 어떤 단계가 실행 중인지 사용자에게 드러내기 위한 것이라 네임스페이스 호출이어도 규칙은 같다.
 
 플러그인 네임스페이스 지정을 지원하지 않는 호스트에서만 `general-purpose`로 폴백하되, 그때는 프롬프트에 "`agents/[에이전트 이름].md`의 지침을 읽고 그대로 따른다"를 반드시 명시한다(pipeline-runner는 디스패치 표가 가리키는 `block-*.md` **하나만** 이어서 읽게 한다). `TaskCreate`가 없는 호스트에서는 `_workspace/00_pipeline_status.md` 체크리스트로 폴백하며 같은 제목을 사용한다.
 
-폴백 파일은 **오케스트레이터가 직접 쓴다**(서브에이전트에게 위임하지 않는다). Phase 1에서 위 작업 그래프와 같은 목록을 `- [ ] T-A · analyzer · 프로젝트 구조·의존성·레거시 로직 분석` 형식으로 한 번에 만들고, 각 절을 시작할 때 그 줄을 `- [~]`(진행 중)로, 서브에이전트 반환 확인 뒤 `- [x]`로 고쳐 쓴다 — `TaskCreate`/`TaskUpdate` 경로의 `in_progress`/`completed` 전이와 같은 시점이다. 온디맨드 작업(`T-WIKI`·`T-Q`)은 Phase 3.6에서 선택됐을 때만 줄을 덧붙인다.
+폴백 파일은 **오케스트레이터가 직접 쓴다**(서브에이전트에게 위임하지 않는다). Phase 1에서 위 작업 그래프와 같은 목록을 `- [ ] T-A · analyzer · 프로젝트 구조·의존성·레거시 로직 분석` 형식으로 한 번에 만들고, 각 절을 시작할 때 그 줄을 `- [~]`(진행 중)로, 서브에이전트 반환 확인 뒤 `- [x]`로 고쳐 쓴다. **고칠 때는 파일 전체를 다시 쓰고 목록을 덧붙이지 않는다** — 같은 단계 ID 줄은 파일에 한 번만 있어야 한다(실측: 목록을 덧붙여 writer~evaluator가 `[x]` 한 벌과 `[ ]` 한 벌로 두 번 남아, 다 끝난 초기화가 덜 끝난 것처럼 보였다). Phase 4를 마치기 전에 이 파일에 `[ ]`·`[~]` 줄이 남았는지 확인하고, 남았다면 실제로 안 끝난 단계인지 중복인지 가려 바로잡는다 — `TaskCreate`/`TaskUpdate` 경로의 `in_progress`/`completed` 전이와 같은 시점이다. 온디맨드 작업(`T-WIKI`·`T-Q`)은 Phase 3.6에서 선택됐을 때만 줄을 덧붙인다.
 
 보완·재검증 작업 제목은 원래 단계 ID를 보존한다.
 
-- `T-A-PATCH · analyzer · 인덱스 무결성 지적 항목 보강` (Phase 4 게이트, targeted/claude-sonnet-5)
+- `T-A-PATCH · analyzer · 인덱스 무결성 지적 항목 보강` (Phase 4 게이트, targeted/sonnet)
 - `T-A-RETRY · analyzer · 누락된 분석 근거 보완` (점수 기반 재실행)
 - `T-W-RETRY · writer · 누락된 하네스 파일·패턴 보완`
 - `T-V-RECHECK · MJS validator · 보완된 초기화 결과 재검증`
@@ -257,7 +259,7 @@ QA(`T-Q`)와 wiki(`T-WIKI`)는 Tier와 무관하게 이 초기 작업 그래프�
 
 ### 반복 스크립트 블록은 pipeline-runner에 위임한다
 
-`agents/lib/*` 스크립트 블록은 전부 `pipeline-runner`에 위임한다 (2-0.5 `index`, 2-2.3 `assemble`, 2-3.5 `verify`, 3.7 `wiki`). 이 블록들은 정상 경로에서도 실행 확인·설정 작성·폴백·재시도·산출물 확인으로 수 회씩 왕복하는데, 오케스트레이터가 직접 하면 그 왕복마다 200~350K 컨텍스트를 다시 읽는다. 위임하면 왕복은 버려지는 서브에이전트 컨텍스트에서 일어나고 메인은 요약 한 덩어리만 받는다.
+`agents/lib/*` 스크립트 블록은 전부 `pipeline-runner`에 위임한다 (2-0.5 `index`, 2-2.3 `assemble`, 2-3.5 `verify`, 3.7 `wiki`). 사유는 `agents/pipeline-runner.md` 참조.
 
 메인 스레드에는 아래 단발 명령과 제어 게이트만 남긴다. 이 호출만을 위해 새 에이전트를 만들지 않는다.
 
@@ -267,7 +269,7 @@ QA(`T-Q`)와 wiki(`T-WIKI`)는 Tier와 무관하게 이 초기 작업 그래프�
 | `analyzer_index_summary.py --assemble-report` | 2-1.6 / Phase 4 갱신 후 | 최신 인덱스 요약을 리포트에 삽입하는 단발 호출. 패치 적용과 같은 도구 호출에서 순차 실행 가능 |
 | `ai-budget.mjs estimate / claim / record` | 견적 / 에이전트 호출 전후 / Phase 4 | 다음 호출 여부를 결정하고 실제 소비를 기록하는 제어 게이트 |
 
-> **스크립트 경로 규칙 (위 잔여 호출과 `pipeline-runner`에 넘기는 `plugin_root` 공통)**: 스크립트는 대상 프로젝트가 아니라 *플러그인 설치 루트*에 있다. PowerShell은 `$env:CLAUDE_PLUGIN_ROOT`, bash는 `$CLAUDE_PLUGIN_ROOT`로 참조한다. 환경변수가 비어 있으면 이 SKILL.md가 위치한 플러그인 디렉터리(예: `~/.claude/plugins/cache/ax-navi/...`)의 절대경로로 대체한다. cwd 기준 상대경로 `agents/lib/...`는 개발 저장소에서만 동작하므로 금지.
+> **스크립트 경로 규칙 (위 잔여 호출과 `pipeline-runner`에 넘기는 `plugin_root` 공통)**: 스크립트는 대상 프로젝트가 아니라 *플러그인 설치 루트*에 있다. 이 문서의 `${CLAUDE_PLUGIN_ROOT}`는 스킬을 불러올 때 그 절대경로로 바뀐다. 적힌 경로를 그대로 실행하고, 스크립트를 찾으려고 디스크를 검색하지 않는다. 경로가 변수 이름 그대로 남아 있으면 이 SKILL.md가 위치한 플러그인 디렉터리(예: `~/.claude/plugins/cache/ax-navi/...`)의 절대경로로 대체한다. cwd 기준 상대경로 `agents/lib/...`는 개발 저장소에서만 동작하므로 금지.
 > **파이썬 인터프리터 규칙**: `.py` 스크립트를 부를 때 `python` 또는 `python3` **어느 쪽도 하드코딩하지 않는다.** 윈도우(공식 설치판·Store판)에는 `python`만 있고, 다수 리눅스 배포판·Homebrew에는 `python3`만 있다 — ITO 현장은 윈도우가 기본이고 CI는 리눅스라 양쪽을 다 밟는다. 먼저 `python3 --version`을 시도해 성공하면 `python3`, 실패하면 `python`을 쓴다(둘 다 실패하면 "파이썬 없음"을 WARN으로 보고하고 그 블록만 건너뛴다 — 조용히 넘어가지 않는다). 아래 예시는 `python`으로 적혀 있으나 실제 호출 시 이 규칙으로 결정한 이름을 쓴다.
 
 ### 분리 저장소 레인 실행 (paired-roots/hub-roots만 해당)
@@ -286,10 +288,10 @@ Agent(
   description="T-I · pipeline-runner · 소스 구조와 호출 관계 인덱싱",
   prompt="<pipeline-runner 에이전트 지침의 block: index를 실행한다.
   block: index. root: [절대경로]. tier: [Standard/Full]. mode: [init/incremental].
-  plugin_root: [$env:CLAUDE_PLUGIN_ROOT 값]. ai_budget_session: [ai_budget_session].
+  plugin_root: [${CLAUDE_PLUGIN_ROOT} 값]. ai_budget_session: [ai_budget_session].
   lane: [T-I 또는 B-I/C1-I 등].
   반환은 지침의 'block: index 반환 형식' 그대로만.>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
@@ -302,7 +304,7 @@ Agent(
 인덱싱이 끝났으므로 규모가 확정됐다. 견적을 뽑는다(스크립트 1회, 메인에서 직접 실행 — 결과로 다음 분기를 정하는 제어 게이트라 위임하지 않는다):
 
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" estimate --root "[절대경로]"
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" estimate --root "[절대경로]"
 ```
 
 반환값(`files`·`tier`·`decidable_unresolved`·`estimated_tokens`·`estimated_minutes`)을 그대로 사용자에게 보인다.
@@ -321,7 +323,7 @@ node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" estimate --root "[절대
 
 | 응답 | 동작 |
 |------|------|
-| `1` · 무응답 | Full로 진행 |
+| `1` · 무응답(사용자가 건너뜀) | Full로 진행 (답할 사람이 없는 실행이면 멈춘다 — "무응답 처리 규칙") |
 | `2` | Standard로 진행 — `00_init_scope.md`의 `tier:`를 Standard로 갱신 |
 | `3` | 파이프라인 중단. 인덱스는 남아 있으므로 `analyze-impact`·`trace-logic`은 이미 동작한다고 안내하고 종료 |
 
@@ -332,7 +334,7 @@ Step 2.5에서 override 키워드로 Tier가 이미 확정됐으면 견적만 �
 토큰 한도가 실제로 의미 있으려면 `used.tokens`가 쌓여야 하는데, 이 하네스는 `Agent()`가 부분 실행 결과(텍스트)만 돌려줄 뿐 실사용 토큰 카운터를 주지 않고 hooks도 없어 진짜 계측은 불가능하다. 대신 **사전 배분 장부**로 근사한다 — 2-1/2-2/2-3에서 각 역할의 `claim --kind initial`이 성공한 직후, 그 역할의 대략적 몫을 기록한다:
 
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role [역할] --spent-tokens [estimated_tokens × 비율]
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role [역할] --spent-tokens [estimated_tokens × 비율]
 ```
 
 비율은 `docs/harness-description.md`의 역할별 비용 구간 중앙값에서 근사한 것이다: analyzer 60%, writer 25%, pattern-extractor 15%(validator·harness-evaluator는 `claim` 대상이 아니므로 기록하지 않는다). **정확한 실사용량이 아니라 "프로젝트가 견적보다 훨씬 크게 나온 경우"를 잡기 위한 근사치라는 걸 감안한다** — 한 역할 내부에서 폭주하는 경우까지는 못 잡는다. 값을 알 수 없는 호스트에서는 생략 — 한도는 시간 쪽으로만 걸린다.
@@ -344,13 +346,13 @@ node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" record --root "[절대�
 Tier별 mode/model 결정:
 | Tier / 상황 | mode | model |
 |------|------|-------|
-| Standard | `init` (A + 스택 해당 Phase B만) | claude-sonnet-5 |
-| Full | `init` (A + B 전체) | claude-sonnet-5 |
-| 업데이트·인덱스 리프레시 (Step 3 표) | `incremental` (변경 파일만 재분석 + stale 엣지 무효화) | claude-sonnet-5 (Tier 무관) |
+| Standard | `init` (A + 스택 해당 Phase B만) | sonnet |
+| Full | `init` (A + B 전체) | sonnet |
+| 업데이트·인덱스 리프레시 (Step 3 표) | `incremental` (변경 파일만 재분석 + stale 엣지 무효화) | sonnet (Tier 무관) |
 
 AI 예산이 초기화됐으면(Step F) claim 먼저:
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role analyzer --kind initial
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role analyzer --kind initial
 ```
 (exit 1이면 이 Agent 호출을 하지 않고 레인 중단 — Step F 참조)
 
@@ -364,20 +366,20 @@ Agent(
   _analysis_input.json을 읽고 _unresolved.jsonl을 계약대로 처리해 _ai_patch.json만 출력한다
   (analyzer.md Step 8 '기계 인덱스가 있을 때' 분기). _meta.json이 없으면 기존대로 직접 작성.
   결과: _workspace/01_analyzer_report.md + (기계 인덱스 없을 때만) _workspace/index/*.json>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
-`.claude/agents/analyzer.md`의 지침 따름. 완료 후 결과 파일 존재 확인.
+플러그인 `agents/analyzer.md`의 지침 따름(네임스페이스 호출로 자동 로드). 완료 후 결과 파일 존재 확인.
 
-AI 예산이 초기화됐으면 완료 직후 이 역할의 사전 배분 몫을 기록한다(2-0.7 설명 참조, analyzer는 견적의 60%): `node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role analyzer --spent-tokens [estimated_tokens*0.6]`.
+AI 예산이 초기화됐으면 완료 직후 이 역할의 사전 배분 몫을 기록한다(2-0.7 설명 참조, analyzer는 견적의 60%): `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role analyzer --spent-tokens [estimated_tokens*0.6]`.
 
 ### 2-1.5. AI 보강 patch 병합 (기계 인덱스가 있을 때만)
 
 `_workspace/index/_ai_patch.json`이 있으면 실행한다.
 
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/build-index.mjs" --root "[절대경로]" --apply-ai-patch "_workspace/index/_ai_patch.json"
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/build-index.mjs" --root "[절대경로]" --apply-ai-patch "_workspace/index/_ai_patch.json"
 ```
 
 기존 노드 사이의 엣지만 추가되고, 없는 노드를 참조하는 operation은 사유와 함께 거부된다. 전부 거부되면 비정상 종료하므로 **WARN으로 보고하고 계속 진행**한다(인덱스 자체는 유효하고 보강만 안 된 상태다). 병합 결과는 `_meta.json`의 `ai_enrichment`에 남는다.
@@ -391,7 +393,7 @@ analyzer가 남긴 `[SECTION_B_INDEX_SUMMARY_INSERT]`를 최신 인덱스 요약
 출력 리포트를 메인에서 다시 읽거나 복사하지 않는다. 실패 시 미조립 WARN을 기록한다.
 
 ```powershell
-python "$env:CLAUDE_PLUGIN_ROOT/agents/lib/analyzer_index_summary.py" --root "[절대경로]" --assemble-report
+python "${CLAUDE_PLUGIN_ROOT}/agents/lib/analyzer_index_summary.py" --root "[절대경로]" --assemble-report
 ```
 
 Phase 4에서 패치 또는 인덱스를 변경한 경우에도 이 명령으로 기계 요약을 갱신한다.
@@ -400,20 +402,20 @@ Phase 4에서 패치 또는 인덱스를 변경한 경우에도 이 명령으로
 
 `_workspace/01_analyzer_report.md` 존재 확인 후.
 
-model: claude-sonnet-5
+model: sonnet
 
-AI 예산이 초기화됐으면 claim 먼저: `node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role writer --kind initial` (exit 1이면 중단).
+AI 예산이 초기화됐으면 claim 먼저: `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role writer --kind initial` (exit 1이면 중단).
 
 ```
 Agent(
   subagent_type="ax-navi:writer",
   description="T-W · writer · 하네스 파일과 프로젝트 가이드 생성",
   prompt="<프로젝트 루트: [절대경로]. tier: [Standard/Full]. 입력: _workspace/01_analyzer_report.md + _workspace/index/*.json (필요 시). 출력: 하네스 파일들(trace/scaffolder/find-logic, cross-repo-* 있는 경우) + _workspace/claude_md_fields.json + _workspace/writer_decisions.json>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
-AI 예산이 초기화됐으면 완료 직후 기록한다(writer는 견적의 25%): `node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role writer --spent-tokens [estimated_tokens*0.25]`.
+AI 예산이 초기화됐으면 완료 직후 기록한다(writer는 견적의 25%): `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role writer --spent-tokens [estimated_tokens*0.25]`.
 
 > writer는 trace.md·scaffolder.md·find-logic.md만 markdown으로 직접 작성한다 (pair_config.md 있으면 cross-repo-scaffold.md·cross-repo-modify.md도). CLAUDE.md는 `_workspace/claude_md_fields.json`에 필드(프로젝트명·한줄설명·스택요약·요청흐름·파일위치표 행·빌드명령·주의사항)만, patterns 스켈레톤·02_writer_files.md는 `_workspace/writer_decisions.json`에 결정 값(조건부 스킬 적용 여부+사유, 패턴 파일명 목록, 탐지 스택, 적용 결정 사유)만 채워서 낸다. domain-expert.md(analyzer_report 그대로 주입)·patterns 스켈레톤·02_writer_files.md는 writer가 쓰지 않고 다음 단계(2-2.3)에서 조립한다. analyze-impact/safe-modify/scaffold-feature/vibe/plan-migration/review-sql은 플러그인 전역판을 그대로 쓰므로 writer도 skills_builder.py도 로컬 파일을 만들지 않는다 — writer는 plan-migration/review-sql의 *적용 여부*만 판단해 writer_decisions.json에 남긴다.
 
@@ -427,36 +429,30 @@ Agent(
   description="T-W-BUILD · pipeline-runner · 하네스 파일 조립",
   prompt="<pipeline-runner 에이전트 지침의 block: assemble을 실행한다.
   block: assemble. root: [절대경로]. tier: [Standard/Full].
-  plugin_root: [$env:CLAUDE_PLUGIN_ROOT 값]. lane: [T-W 또는 B-W/C1-W 등].
+  plugin_root: [${CLAUDE_PLUGIN_ROOT} 값]. lane: [T-W 또는 B-W/C1-W 등].
   반환은 지침의 'block: assemble 반환 형식' 그대로만.>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
-> writer는 trace.md·scaffolder.md·find-logic.md만 markdown으로 직접 작성한다 (pair_config.md 있으면 cross-repo-scaffold.md·cross-repo-modify.md도). CLAUDE.md는 `_workspace/claude_md_fields.json`에 필드만, patterns 스켈레톤·02_writer_files.md는 `_workspace/writer_decisions.json`에 결정 값만 채워서 낸다. domain-expert.md·patterns 스켈레톤·02_writer_files.md는 이 단계에서 조립된다. analyze-impact/safe-modify/scaffold-feature/vibe/plan-migration/review-sql은 플러그인 전역판을 그대로 쓰므로 로컬 파일을 만들지 않는다 — writer는 plan-migration/review-sql의 *적용 여부*만 판단해 writer_decisions.json에 남긴다.
-
-반환의 `RESULT`가 `PARTIAL`/`FAIL`이면 누락 항목을 그대로 Phase 3 보고에 옮기고 계속 진행한다. 스크립트가 항목별로 독립 처리하므로 일부만 실패할 수 있다 — 파이프라인을 중단하지 않는다.
-
-### 2-2.5. ito-guide.md (2-2.3에 통합 — 별도 Agent 호출 없음)
-
-`.claude/ito-guide.md`는 2-2.3의 `skills_builder.py`가 `agents/lib/ito_guide.md.template`로 기계 조립한다(zero-LLM) — 전 항목이 이미 있는 산출물(스킬 frontmatter·claude_md_fields·writer_decisions·pair_config)의 재진술이라 LLM 작성이 불필요했다 (2026-07-23 전환, 이전에는 매 초기화마다 sonnet ~5K 토큰 소비). 존재 확인도 2-2.3의 `pipeline-runner` 반환(`.claude/ito-guide.md: 생성 | 누락`)으로 끝나므로 오케스트레이터가 따로 확인하지 않는다. `누락`이면 "ito-guide 미생성" WARN 후 계속 진행.
+반환의 `RESULT`가 `PARTIAL`/`FAIL`이면 누락 항목을 그대로 Phase 3 보고에 옮기고 계속 진행한다. 스크립트가 항목별로 독립 처리하므로 일부만 실패할 수 있다 — 파이프라인을 중단하지 않는다. `.claude/ito-guide.md`도 이 블록에서 `agents/lib/ito_guide.md.template`로 기계 조립되며(LLM 없음), 반환의 `.claude/ito-guide.md: 누락`이면 "ito-guide 미생성" WARN 후 계속 진행한다.
 
 ### 2-3. pattern-extractor 호출 (레인 간 병렬 가능)
 
 2-2.3(assemble 블록)이 patterns/ 스켈레톤을 생성한 뒤에만 호출한다 — 스켈레톤은 writer(2-2)가 아니라 `skills_builder.py`(2-2.3)의 산출물이므로, T-P를 TaskCreate 의존성만으로 착수시키지 말고 2-2.3 반환을 받고 시작한다.
 
-AI 예산이 초기화됐으면 claim 먼저: `node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role pattern-extractor --kind initial` (exit 1이면 중단).
+AI 예산이 초기화됐으면 claim 먼저: `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role pattern-extractor --kind initial` (exit 1이면 중단).
 
 ```
 Agent(
   subagent_type="ax-navi:pattern-extractor",
   description="T-P · pattern-extractor · 레이어별 컨벤션 패턴 추출",
   prompt="<프로젝트 루트: [절대경로]. 입력: .claude/patterns/*.md 스켈레톤 + _workspace/01_analyzer_report.md + _workspace/index/*.json. 출력: 패턴 파일 본문 + .claude/patterns/pattern_profile.json + _workspace/05_patterns_extracted.md>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
-AI 예산이 초기화됐으면 완료 직후 기록한다(pattern-extractor는 견적의 15%): `node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role pattern-extractor --spent-tokens [estimated_tokens*0.15]`.
+AI 예산이 초기화됐으면 완료 직후 기록한다(pattern-extractor는 견적의 15%): `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" record --root "[절대경로]" --role pattern-extractor --spent-tokens [estimated_tokens*0.15]`.
 
 ### 2-3.5. 패턴 프로필 + 기계 검증 (LLM 미사용) — `pipeline-runner`
 
@@ -468,9 +464,9 @@ Agent(
   description="T-V-CHECK · pipeline-runner · 패턴 프로필과 인덱스 기계 검증",
   prompt="<pipeline-runner 에이전트 지침의 block: verify를 실행한다.
   block: verify. root: [절대경로]. tier: [Standard/Full].
-  plugin_root: [$env:CLAUDE_PLUGIN_ROOT 값]. lane: [T-V 또는 B-V/C1-V 등].
+  plugin_root: [${CLAUDE_PLUGIN_ROOT} 값]. lane: [T-V 또는 B-V/C1-V 등].
   반환은 지침의 'block: verify 반환 형식' 그대로만.>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
@@ -493,7 +489,7 @@ Agent(
   subagent_type="ax-navi:validator",
   description="T-V · MJS validator · 하네스 구조와 근거 검증",
   prompt="<프로젝트 루트: [절대경로]. tier: [Standard/Full]. 입력: _workspace/01_analyzer_report.md, _workspace/02_writer_files.md, _workspace/validator_mechanical.json(있으면), _workspace/validator_schema.json(있으면), _workspace/pattern_profile_validation.json(있으면), (있으면) _workspace/index/. 출력: _workspace/03_validator_report.md>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
@@ -512,7 +508,7 @@ Agent(
         _workspace/pattern_profile_validation.json,
         생성된 harness 파일들 (CLAUDE.md, .claude/skills/, .claude/agents/, .claude/patterns/).
   출력: _workspace/06_eval_report.md>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
@@ -577,19 +573,6 @@ Eval 품질 점수 (harness-evaluator):
   "이 코드 뭐하는 거야"              → legacy-decoder (직접 호출)
   "문서 동기화"                      → doc-syncer (직접 호출)
 
-다음 단계 — 팀에 공유 (이걸 해야 다음 사람이 초기화를 반복하지 않습니다):
-
-  1) _ai_patch.json이 .gitignore에 걸려 있는지 먼저 확인
-     git check-ignore -v _workspace/index/_ai_patch.json
-     걸려 있으면 .gitignore에 예외를 추가:  !_workspace/index/_ai_patch.json
-
-  2) git add CLAUDE.md .claude/ _workspace/index/_ai_patch.json
-     git commit -m "docs: add project harness (AX Navi v1)"
-
-  팀원은 pull 후 아무것도 하지 않아도 됩니다 — 필요하면 인덱싱 한 번(수십 초, LLM 사용 없음)이
-  자동으로 돌고, 그 뒤 바로 analyze-impact·trace-logic 등을 쓸 수 있습니다.
-  (인덱스까지 커밋하면 그 인덱싱조차 생략됩니다 — 팀 정책에 맞게 선택하세요.)
-
 피드백 요청:
 결과에서 개선할 부분이 있나요? 워크플로우 스킬 트리거 조정이 필요한가요?
 ```
@@ -604,7 +587,8 @@ HIGH 우선순위 항목이 있으면 사용자에게 명시적 안내. 자동 �
 
 | 조건 | 동작 |
 |------|------|
-| `init_layout = "single-root"`, `"monorepo"`, `"selected-paths"` | 이 Phase 전체 스킵 → Phase 3.6으로 |
+| `init_layout = "single-root"`인데 ① 구성이 미확인(`00_init_scope.md`에 `unconfirmed: true`)이거나 ② 재초기화 전 연동 설정 `_workspace_prev/pair_config.md`(또는 `_workspace/pair_config.md`)가 남아 있음 | **연동 여부를 묻는다** — 아래 "연동 여부 질문 방식"을 쓰되, ②면 질문 본문에 이전 파트너 경로·역할을 적고 그 값을 pair-init에 제안값으로 넘긴다. 예면 `pair-init` 단독 실행(파트너 하네스가 없으면 pair-init Phase 1의 3지선다가 이어진다) → Phase 3.6으로 |
+| `init_layout = "single-root"`, `"monorepo"`, `"selected-paths"` (위 행에 해당 안 함) | 이 Phase 전체 스킵 → Phase 3.6으로 |
 | `_workspace/pair_config.md` 이미 있고 `pair_lane_state.md`도 `pair_state: complete` | 이 Phase 전체 스킵 → Phase 3.6으로 |
 | `init_layout = "paired-roots"`/`"hub-roots"` + Phase 2의 분리 저장소 레인이 방금 `pair_state: barrier_done`으로 끝남 | 아래 P-BARRIER부터 진행 |
 | Phase -1 스킵 + `pair_config.md` 없음 (레인 그래프 자체를 안 거친 경우) | 연동 여부 질문 후 진행(기존 방식 — pair-init 단독 실행) |
@@ -617,7 +601,7 @@ HIGH 우선순위 항목이 있으면 사용자에게 명시적 안내. 자동 �
 
 초기화 파이프라인이 끝난 뒤, 기본 파이프라인에 포함되지 않는 후속 작업을 **한 번의 질문으로** 제시하고 선택받는다. 선택하지 않은 항목은 실행하지 않는다.
 
-> wiki는 2026-08-16부터 자동 실행이 아니다 — 이 단계는 초기화 컨텍스트가 최대일 때 도달하므로, 초기화와 분리해 새 세션에서 돌리는 편이 같은 결과를 더 싸게 얻는다. 경위는 `docs/changelog.md` 2026-08-16 항목.
+> wiki는 자동 실행하지 않는다 — 이 단계는 초기화 컨텍스트가 최대일 때 도달하므로, 초기화와 분리해 새 세션에서 돌리는 편이 같은 결과를 더 싸게 얻는다.
 
 `AskUserQuestion` **1회**, `multiSelect: true`로 묻는다(header: `선택 작업`). Phase -1·2-0.7과 같은 규칙 — 모든 필드를 한국어로 채운다.
 
@@ -643,11 +627,11 @@ HIGH 우선순위 항목이 있으면 사용자에게 명시적 안내. 자동 �
 | `wiki 생성` | Phase 3.7의 "wiki 실행" 수행 |
 | `wiki 생성 + AI 해설` | wiki 실행에 `narrative: true`를 함께 넘긴다 |
 | `경계 QA` | Phase 3.7의 "QA 실행" 수행 |
-| `지금 안 함` · 무응답 · 다른 주제로 전환 | 둘 다 실행하지 않고 Phase 4로 진행 (기본값) |
+| `지금 안 함` · 무응답(사용자가 건너뜀) · 다른 주제로 전환 | 둘 다 실행하지 않고 Phase 4로 진행 (기본값. 답할 사람이 없는 실행이면 멈춘다 — "무응답 처리 규칙") |
 
 `지금 안 함`이 다른 항목과 함께 선택되면 다른 항목을 우선한다(명시적 실행 의사로 본다). wiki 두 옵션이 함께 선택되면 해설 포함으로 1회만 실행한다.
 
-`AskUserQuestion` 툴이 없는 호스트에서는 같은 내용을 번호 목록 평문으로 출력하고 자유 텍스트 응답(`1`·`1 +n`·`2`·`3`, 복수 선택 가능)을 받는다.
+`AskUserQuestion` 툴이 없는 호스트에서는 같은 내용을 번호 목록 평문으로 출력하고 자유 텍스트 응답(위 표의 라벨 순서대로 `1`~`4`, 복수 선택 가능)을 받는다.
 
 `_workspace/03_validator_report.md` 신뢰도 < 50이면 `경계 QA` 옵션의 `description` 끝에 "— 구조 검증 실패로 결과 없이 종료됨"을 덧붙여 표시한다(선택해도 미실행 사유만 기록).
 
@@ -659,7 +643,7 @@ HIGH 우선순위 항목이 있으면 사용자에게 명시적 안내. 자동 �
 
 Phase 3.6에서 고른 항목만 실행한다. 둘 다 골랐으면 두 `Agent()` 호출을 **같은 메시지에서** 발행한다 — 서로 의존하지 않는다.
 
-### wiki 실행 (1번 선택 시)
+### wiki 실행 (`wiki 생성` 또는 `wiki 생성 + AI 해설` 선택 시)
 
 생성 자체는 `wiki_generator.py` 한 번이지만 실제로는 기존 wiki 백업·산출물 확인·`07_wiki_build.md` 확인이 뒤따르므로 `pipeline-runner`에 위임한다. 절차 상세는 `agents/lib/pipeline-runner/block-wiki.md`에 있다(`agents/pipeline-runner.md`의 디스패치 표가 가리킨다).
 
@@ -668,11 +652,11 @@ Agent(
   subagent_type="ax-navi:pipeline-runner",
   description="T-WIKI · pipeline-runner · wiki 페이지 생성",
   prompt="<pipeline-runner 에이전트 지침의 block: wiki를 실행한다.
-  block: wiki. root: [절대경로]. plugin_root: [$env:CLAUDE_PLUGIN_ROOT 값].
+  block: wiki. root: [절대경로]. plugin_root: [${CLAUDE_PLUGIN_ROOT} 값].
   lane: [단일이면 T-WIKI, 분리 저장소면 레인별로 각각].
-  narrative: [사용자가 '+n'/'해설 포함'을 골랐으면 true, 아니면 생략].
+  narrative: [사용자가 'wiki 생성 + AI 해설'을 골랐으면 true, 아니면 생략].
   반환은 지침의 'block: wiki 반환 형식' 그대로만.>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
@@ -682,7 +666,7 @@ Agent(
 
 **중앙 허브 발행 여부**는 wiki가 실제로 생성된 경우에만 이어서 묻는다. `generate-wiki` Phase 3.5와 같은 질문이며, 서브에이전트는 사용자에게 질문할 수 없으므로 오케스트레이터가 한다. Y면 `publish-wiki` 스킬을 실행한다. DB 저장은 harness에 내장된 `agents/lib/wikihub_db/`가 처리하므로 별도 프로젝트 wiki-hub 설치 여부와 무관하게 항상 가능하다.
 
-### QA 실행 (2번 선택 시)
+### QA 실행 (`경계 QA` 선택 시)
 
 Boundary 6 기계 체크(`qa_boundary6.py`)는 오케스트레이터가 미리 돌리지 않는다 — qa 에이전트가 자기 컨텍스트에서 첫 순서로 직접 실행한다(`agents/qa.md` "Boundary 6" 절). 스크립트 1회 실행을 위해 메인 스레드가 왕복할 이유가 없고, qa는 어차피 그 결과를 읽어야 하는 유일한 소비자다.
 
@@ -690,8 +674,8 @@ Boundary 6 기계 체크(`qa_boundary6.py`)는 오케스트레이터가 미리 �
 Agent(
   subagent_type="ax-navi:qa",
   description="T-Q · qa · 경계면 교차 비교 검증",
-  prompt="<프로젝트 루트: [절대경로]. plugin_root: [$env:CLAUDE_PLUGIN_ROOT 값]. Boundary 6은 qa_boundary6.py를 직접 실행해 처리한다. 입력: _workspace/01~03 + _workspace/index/. 출력: _workspace/04_qa_report.md>",
-  model="claude-sonnet-5"
+  prompt="<프로젝트 루트: [절대경로]. plugin_root: [${CLAUDE_PLUGIN_ROOT} 값]. Boundary 6은 qa_boundary6.py를 직접 실행해 처리한다. 입력: _workspace/01~03 + _workspace/index/. 출력: _workspace/04_qa_report.md>",
+  model="sonnet"
 )
 ```
 
@@ -720,20 +704,20 @@ harness-evaluator는 harness 파일이 인덱스를 참조하는지만 보고 �
 
 같은 반환의 `schema`·`schema_fail_messages`(원본은 `_workspace/validator_schema.json`)에서 `failures > 0`인 경우도 게이트 대상이다. `plugin_contract_failures`(`checks`의 `code === "PLUGIN_INDEX_CONTRACT"`)는 `build-index.mjs`/`docs/index-schema/*.json` 자체의 계약 결함이라 analyzer나 프로젝트 소스 문제가 아니며, 아래 표에서 별도로 처리한다.
 
-위 중 하나라도 해당하면 **원인을 소유한 쪽에 맞는 조치**를 취한다. 예전에는 신호 종류와 무관하게 `analyzer`를 통째로(Full이면 opus) 재실행했는데, 게이트가 요구하는 것은 대부분 analyzer가 고칠 수 없거나(인덱서 소유 파일) 패치 오퍼레이션 몇 개면 끝나는 일이라 값을 못 하는 비용이었다. 아래 표로 라우팅한다.
+위 중 하나라도 해당하면 **원인을 소유한 쪽에 맞는 조치**를 취한다. 아래 표로 라우팅한다.
 
 | 게이트 신호 | 원인 소유자 | 조치 | LLM 비용 |
 |---|---|---|---|
 | `index_integrity_fail` · `index_spotcheck_fail` + `_meta.generator == "deterministic-indexer"` | 인덱서 | 2-0.5의 `block: index`를 `mode: init`으로 1회 재실행 | 없음 |
-| 같은 신호 + 기계 인덱스 없음(analyzer가 직접 작성) | analyzer | 아래 **targeted 재실행** | `claude-sonnet-5` 1회 |
-| `warns`에 "analyzer.md Step 8 참고" (inherit·inject edge 0개) | analyzer | 아래 **targeted 재실행** — `_ai_patch.json`의 `add_edge`로 해소되는 신호다 | `claude-sonnet-5` 1회 |
-| `warns`에 "generated_at" | 그 파일을 쓴 쪽 | 기계 인덱스면 `block: index` 재실행, analyzer 산출물이면 targeted 재실행 | 없음 또는 `claude-sonnet-5` 1회 |
+| 같은 신호 + 기계 인덱스 없음(analyzer가 직접 작성) | analyzer | 아래 **targeted 재실행** | `sonnet` 1회 |
+| `warns`에 "analyzer.md Step 8 참고" (inherit·inject edge 0개) | analyzer | 아래 **targeted 재실행** — `_ai_patch.json`의 `add_edge`로 해소되는 신호다 | `sonnet` 1회 |
+| `warns`에 "generated_at" | 그 파일을 쓴 쪽 | 기계 인덱스면 `block: index` 재실행, analyzer 산출물이면 targeted 재실행 | 없음 또는 `sonnet` 1회 |
 | `schema.failures > 0` + `plugin_contract_failures == 0`, 대상이 인덱서 소유 파일(`data_flow`·`client_index` 포함 — 둘 다 구조 필드만 필수라 스키마 실패는 항상 구조 쪽 결함이다) | 인덱서 | `block: index` 재실행 | 없음 |
-| 같은 조건, 대상이 `owasp_top10`(analyzer 전량 작성) | analyzer | targeted 재실행 | `claude-sonnet-5` 1회 |
-| 같은 조건, 대상이 `api_contract` | api-bridge | `api-bridge` extract 재실행(자체 스키마 검증 포함 — `agents/api-bridge.md` Step 4 규칙 3) | `claude-sonnet-5` 1회 |
+| 같은 조건, 대상이 `owasp_top10`(analyzer 전량 작성) | analyzer | targeted 재실행 | `sonnet` 1회 |
+| 같은 조건, 대상이 `api_contract` | api-bridge | `api-bridge` extract 재실행(자체 스키마 검증 포함 — `agents/api-bridge.md` Step 4 규칙 3) | `sonnet` 1회 |
 | `plugin_contract_failures > 0` | 플러그인 | **AI로 재시도하지 않는다.** Phase 3 보고에 "플러그인 인덱스 계약 결함 — build-index.mjs/docs/index-schema 확인 필요"로 명시 | 없음 |
 
-`analyzer`가 인덱서 소유 파일(`_meta.json`의 `indexes` 목록)을 고칠 수 없다는 것이 라우팅의 근거다 — `agents/analyzer.md` Step 8 "기계 인덱스가 있을 때" 계약상 그 파일들은 한 줄도 건드리지 못하고 `_ai_patch.json`만 낼 수 있다. 그런 파일의 구조 결함에 analyzer를 부르는 것은 정의상 해결될 수 없는 호출이었다.
+`analyzer`가 인덱서 소유 파일(`_meta.json`의 `indexes` 목록)을 고칠 수 없다는 것이 라우팅의 근거다 — `agents/analyzer.md` Step 8 "기계 인덱스가 있을 때" 계약상 그 파일들은 한 줄도 건드리지 못하고 `_ai_patch.json`만 낼 수 있다.
 
 ### targeted 재실행 (게이트가 analyzer로 라우팅한 경우)
 
@@ -747,15 +731,15 @@ Agent(
   고칠 항목(이것만 본다): [해당 warn·FAIL 메시지 원문].
   Phase A/B 재분석 금지, _workspace/01_analyzer_report.md 재작성 금지.
   기계 인덱스가 있으면 _workspace/index/_ai_patch.json만, 없으면 지목된 인덱스 파일만 고친다.>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
-`mode: targeted`의 계약은 `agents/analyzer.md` "실행 모드" 표에 있다. 최초 분석과 보정 모두 Sonnet 5를 쓰되, 이 패스에서는 지목된 관계만 확인해 패치 오퍼레이션으로 옮긴다.
+`mode: targeted`의 계약은 `agents/analyzer.md` "실행 모드" 표에 있다. 최초 분석과 보정 모두 `sonnet`을 쓰되, 이 패스에서는 지목된 관계만 확인해 패치 오퍼레이션으로 옮긴다.
 
 기계 인덱스가 있으면 targeted 재실행 뒤 2-1.5의 `--apply-ai-patch`를 다시 실행해야 패치가 반영된다. 빠뜨리면 `_ai_patch.json`만 남고 인덱스는 그대로라 게이트가 그대로 재현된다.
 
-harness-evaluator가 이미 `analyzer` fix_target을 반환했으면 이 게이트의 항목을 그 행에 병합한다(같은 회차에 analyzer를 두 번 부르지 않는다). 점수별 보정 범위는 아래 규칙을 따르며 모델은 항상 Sonnet 5다.
+harness-evaluator가 이미 `analyzer` fix_target을 반환했으면 이 게이트의 항목을 그 행에 병합한다(같은 회차에 analyzer를 두 번 부르지 않는다). 점수별 보정 범위는 아래 규칙을 따르며 모델은 항상 `sonnet`이다.
 
 ### 게이트 해소 확인
 
@@ -775,7 +759,7 @@ harness-evaluator가 이미 `analyzer` fix_target을 반환했으면 이 게이�
 
 AI 예산이 초기화됐으면 각 fix_target마다 재실행 전 claim(exit 1이면 그 fix_target은 건너뛰고 Phase 3 보고에 "예산 소진으로 미실행" 명시, 다른 fix_target은 계속 진행). 게이트가 부르는 `T-A-PATCH`도 `--role analyzer --kind retry`로 같은 claim을 거친다 — LLM을 쓰지 않는 `block: index` 재실행은 claim 대상이 아니다:
 ```powershell
-node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role "[fix_target.agent]" --kind retry --reason "[fix_target.instruction, 100자로 트림]"
+node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" claim --root "[절대경로]" --session "[ai_budget_session]" --role "[fix_target.agent]" --kind retry --reason "[fix_target.instruction, 100자로 트림]"
 ```
 
 ```
@@ -790,18 +774,11 @@ for each fix_target in eval_report.fix_targets (우선순위 순):
     범위: [fix_target.scope].
     프로젝트 루트: [절대경로].
     기존 산출물: _workspace/01_analyzer_report.md, _workspace/02_writer_files.md>",
-    model="claude-sonnet-5"
+    model="sonnet"
   )
 ```
 
-재실행 모델은 **claude-sonnet-5 고정**이다. 점수가 낮아도 Opus로 자동 승격하지 않고, 기존 보정 범위·재시도 한도·FAIL 처리를 유지한다.
-
-| 재실행 종류 | model |
-|---|---|
-| 게이트 단독(점수 PASS) → `T-A-PATCH` | claude-sonnet-5 — targeted |
-| PARTIAL(60~79)의 `analyzer` fix_target | claude-sonnet-5 — 지목된 항목만 보완 |
-| RETRY(0~59)의 `analyzer` fix_target | claude-sonnet-5 — 기존 Tier 범위로 분석 재실행 |
-| `writer` 재실행 | claude-sonnet-5 |
+재실행 모델은 전부 `sonnet`이다(상단 "모델 고정" 규칙). 점수가 낮아도 Opus로 자동 승격하지 않고, 기존 보정 범위·재시도 한도·FAIL 처리를 유지한다.
 
 PARTIAL 구간은 fix_target의 `instruction`+`scope`로 범위를 좁혀 재분석 비용을 줄인다. 모델 고정을 이유로 보정 범위를 확대하거나 재시도 횟수를 늘리지 않는다.
 
@@ -816,7 +793,7 @@ Agent(
   prompt="<평가 회차: 2.
   프로젝트 루트: [절대경로]. tier: [Standard/Full].
   출력: _workspace/06_eval_report.md (덮어쓰기)>",
-  model="claude-sonnet-5"
+  model="sonnet"
 )
 ```
 
@@ -858,16 +835,3 @@ Eval 품질 점수: 63/100 → 84/100 (+21, PARTIAL→PASS)
 | `validator_schema.json`의 `plugin_contract_failures > 0` | AI 재시도하지 않음. Phase 3 보고에 "플러그인 인덱스 계약 결함"으로 명시 |
 
 상충 데이터: writer가 두 패턴 발견 시 출처 병기, validator/qa가 우선순위 권고 (자동 결정 X).
-
----
-
-## 팀 통신 프로토콜
-
-이 하네스는 `TeamCreate`/`SendMessage` 도구 없음. 대신:
-
-| 채널 | 도구 | 용도 |
-|------|------|------|
-| 작업 조율 | `TaskCreate`/`TaskUpdate` | 진행 추적, 의존성 |
-| 산출물 전달 | `_workspace/` 파일 | 분석 리포트·생성 파일·검증·인덱스 |
-
-각 에이전트는 자기 `.md`에 명시된 입력 파일을 읽고 출력 파일을 작성. 오케스트레이터는 의존성 순서로 호출하고 산출물 존재 확인.

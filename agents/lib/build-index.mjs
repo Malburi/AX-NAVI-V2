@@ -29,17 +29,19 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  ADAPTERS,
   ADAPTER_DISCOVERY_ONLY_EXTENSIONS,
   ADAPTER_SOURCE_EXTENSIONS,
   buildAdapterCoverage,
   detectAdapters,
 } from "./adapters/registry.mjs";
 import { extractNexacro } from "./adapters/nexacro.mjs";
+import { extractDispatchCalls, extractResultKeys, inferDispatchRules, resolveCall, selectColumns } from "./index/dispatch.mjs";
 
-export const INDEXER_VERSION = "1.11.0"; // AI 패치 보존·파생 흐름 갱신·안정적인 그룹 판정 ID.
+export const INDEXER_VERSION = "2.0.0"; // 문자열 디스패치(worker·action → 빈 메서드)와 결과를 위치로 읽는 화면을 잇고, SELECT 컬럼 순서를 남긴다.
 
 /* AI edge patch에서 허용하는 관계 종류. analyzer는 노드를 새로 만들 수 없고 기존 노드 사이의 관계만 보강한다. */
-const AI_PATCH_EDGE_TYPES = new Set(["call", "inject", "inherit", "reflect"]);
+const AI_PATCH_EDGE_TYPES = new Set(["call", "inject", "inherit", "reflect", "dispatch"]);
 /*
  * `_analysis_input.json`의 digest 상한.
  * analyzer는 대형 index를 직접 읽지 못하므로, 인덱서가 이미 메모리에 갖고 있는 사실을
@@ -59,7 +61,7 @@ const DIGEST_LIMITS = {
   partial_coverage: 20,
 };
 /* 대표 파일 경로 목록 상한 — 경로 문자열뿐이라 Tier가 커질수록 넉넉하게 준다. */
-const REPRESENTATIVE_FILE_LIMITS = { Lite: 50, Standard: 150, Full: 300 };
+const REPRESENTATIVE_FILE_LIMITS = { Standard: 150, Full: 300 };
 /*
  * 대표 파일 목록에 **바이트 예산**을 함께 건다.
  *
@@ -71,7 +73,7 @@ const REPRESENTATIVE_FILE_LIMITS = { Lite: 50, Standard: 150, Full: 300 };
  * 또 지나치게 큰 파일은 애초에 "대표"가 아니다 — 컨벤션을 담은 손으로 쓴 코드가 아니라
  * 생성물·번들·데이터인 경우가 대부분이다. 개별 상한으로 먼저 걸러낸다.
  */
-const REPRESENTATIVE_BYTE_BUDGET = { Lite: 256 * 1024, Standard: 768 * 1024, Full: 1536 * 1024 };
+const REPRESENTATIVE_BYTE_BUDGET = { Standard: 768 * 1024, Full: 1536 * 1024 };
 const REPRESENTATIVE_PER_FILE_CAP = 128 * 1024;
 
 /*
@@ -86,7 +88,7 @@ const STRUCTURED_SOURCE_EXTENSIONS = [".java", ".kt", ".kts", ...JS_FAMILY_EXTEN
 const SOURCE_EXTENSIONS = new Set([
   ...ADAPTER_SOURCE_EXTENSIONS,
   ...STRUCTURED_SOURCE_EXTENSIONS,
-  ".xml", ".sql", ".jsp", ".jspx", ".tag", ".asp", ".aspx", ".ascx", ".ashx", ".asmx",
+  ".xml", ".sql", ".jsp", ".jspx", ".jspf", ".tag", ".asp", ".aspx", ".ascx", ".ashx", ".asmx",
   ".vb", ".vbs", ".xaml", ".cshtml", ".vbhtml", ".razor", ".php", ".rb",
   ".cbl", ".cob", ".cpy", ".abap", ".html", ".htm",
   ".properties", ".yml", ".yaml", ".json",
@@ -95,7 +97,7 @@ const MANIFEST_FILES = new Set(["pom.xml", "go.mod", "package.json", "build.grad
 const DISCOVERY_ONLY_EXTENSIONS = ADAPTER_DISCOVERY_ONLY_EXTENSIONS;
 const EXCLUDED_DIRS = new Set([
   ".git", "node_modules", "vendor", "dist", "build", "target", "out", ".next", ".nuxt",
-  "coverage", "_workspace", "_workspace_prev", ".claude", ".idea", ".vscode", "bin", "obj",
+  "coverage", "_workspace", "_workspace_prev", ".claude", ".axnavi", ".idea", ".vscode", "bin", "obj",
   ".venv", "venv", "env", ".tox", "site-packages", "__pycache__", ".pytest_cache", ".mypy_cache",
 ]);
 /* generate-wiki 산출물(wiki/, wiki_prev/)은 2026-08-14부터 _workspace/ 아래로 옮겨져
@@ -196,6 +198,7 @@ function parseArgs(argv) {
     else if (arg === "--mode") result.mode = argv[++i];
     else if (arg === "--tier") result.tier = argv[++i];
     else if (arg === "--config") result.config = argv[++i];
+    else if (arg === "--index-dir") result.indexDir = argv[++i];
     else if (arg === "--apply-ai-patch") result.applyAiPatch = argv[++i];
     else if (arg === "--quiet") result.quiet = true;
     else if (arg === "--check-stale") result.checkStale = true;
@@ -205,14 +208,13 @@ function parseArgs(argv) {
   if (!result.applyAiPatch && !new Set(["init", "incremental", "feature-scoped"]).has(result.mode)) {
     throw new Error(`지원하지 않는 mode: ${result.mode}`);
   }
-  if (!new Set(["Auto", "Lite", "Standard", "Full"]).has(result.tier)) {
+  if (!new Set(["Auto", "Standard", "Full"]).has(result.tier)) {
     throw new Error(`지원하지 않는 tier: ${result.tier}`);
   }
   return result;
 }
 
 function recommendedTier(score) {
-  if (score <= 50) return "Lite";
   if (score <= 120) return "Standard";
   return "Full";
 }
@@ -315,13 +317,36 @@ function isIncluded(rel, includePaths) {
   return includePaths.some((scope) => !scope || rel === scope || rel.startsWith(`${scope}/`));
 }
 
+/*
+ * 빌드 결과물 이름이면서 업무 폴더 이름으로도 흔한 것. 이름만 보고 빼면 업무 코드가 빠진다 —
+ * 실측(xu25-client): `html/script/js/back/demand/target/demand_target_view.js`(수요조사 '대상자' 화면)가
+ * `target` 이라는 이유로 인덱스에서 빠져, 영향도 24곳 중 1곳을 놓쳤다. 빌드 설정 파일 옆이거나
+ * 안에 빌드 흔적이 있을 때만 빌드 결과물로 본다.
+ */
+const AMBIGUOUS_BUILD_DIRS = new Set(["target", "build", "dist", "out", "bin", "obj"]);
+const BUILD_MANIFESTS = /^(?:pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|package\.json|build\.xml|Makefile|.*\.(?:csproj|vbproj|sln|fsproj))$/i;
+const BUILD_MARKERS = new Set(["classes", "maven-status", "generated-sources", "generated-test-sources", "test-classes", "Debug", "Release", "tmp", "libs", "reports", "intermediates"]);
+function looksLikeBuildOutput(parent, name) {
+  try {
+    if (readdirSync(parent).some((item) => BUILD_MANIFESTS.test(item))) return true;
+    return readdirSync(join(parent, name)).some((item) => BUILD_MARKERS.has(item) || /\.(?:jar|war|class|dll|pdb|exe|map)$/i.test(item));
+  } catch {
+    return true;
+  }
+}
+
+function isExcludedDir(parent, name) {
+  if (!EXCLUDED_DIRS.has(name)) return false;
+  return AMBIGUOUS_BUILD_DIRS.has(name) ? looksLikeBuildOutput(parent, name) : true;
+}
+
 function listFiles(root, includePaths = [""], config = null) {
   const output = [];
   const excluded = [];
   function walk(dir, relDir = "") {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (EXCLUDED_DIRS.has(entry.name)) continue;
+        if (isExcludedDir(dir, entry.name)) continue;
         if (relDir === "plugins" && entry.name === "AX-Harness") continue;
         walk(join(dir, entry.name), join(relDir, entry.name));
         continue;
@@ -362,7 +387,7 @@ function discoverUnsupportedFiles(root, includePaths = [""]) {
   function walk(dir, relDir = "") {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (EXCLUDED_DIRS.has(entry.name)) continue;
+        if (isExcludedDir(dir, entry.name)) continue;
         if (relDir === "plugins" && entry.name === "AX-Harness") continue;
         walk(join(dir, entry.name), join(relDir, entry.name));
         continue;
@@ -375,6 +400,44 @@ function discoverUnsupportedFiles(root, includePaths = [""]) {
   }
   walk(root);
   return output.sort();
+}
+
+/*
+ * 인덱서가 아예 읽지 않는 확장자(소스도, discovery-only도, 매니페스트도 아닌 것)를 센다.
+ * 인덱스에는 이런 파일이 흔적도 남지 않아 "이 도구가 못 보는 코드가 얼마나 되나"를 알 수 없었다.
+ * 커버리지 진단(coverage-report.mjs)에서만 부른다 — stat 없이 readdir만 하므로 가볍다.
+ */
+export function scanUnindexedExtensions(rootArg) {
+  const root = resolve(rootArg);
+  const config = loadConfig(root, null);
+  const counts = new Map();
+  function walk(dir, relDir = "") {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        /* `.settings`(Eclipse) 같은 점 폴더는 IDE·도구 메타데이터다. */
+        if (EXCLUDED_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+        if (relDir === "plugins" && entry.name === "AX-Harness") continue;
+        walk(join(dir, entry.name), join(relDir, entry.name));
+        continue;
+      }
+      const ext = extname(entry.name).toLowerCase();
+      if (SOURCE_EXTENSIONS.has(ext) || MANIFEST_FILES.has(entry.name) || DISCOVERY_ONLY_EXTENSIONS.has(ext)) continue;
+      /* `.classpath`·`.gitignore` 같은 점 파일, `x.mrd.bak100506`·`x.mrd_100702` 같은 백업은 코드가 아니다. */
+      if (entry.name.startsWith(".") || /\.(?:bak\w*|old|orig|tmp)$|~$|\.\w+_\d{6,8}$/i.test(entry.name)) continue;
+      const rel = slash(relative(root, join(dir, entry.name)));
+      if (!isIncluded(rel, config.include_paths)) continue;
+      /* 인덱서가 벤더로 빼는 폴더(fck_editor·jquery-*)의 .cfm·.pl·.as는 우리 코드 누락이 아니다. */
+      if (VENDOR_DIR.test(rel)) continue;
+      const key = ext || "(확장자 없음)";
+      const current = counts.get(key) || { extension: key, files: 0, sample: rel };
+      current.files += 1;
+      counts.set(key, current);
+    }
+  }
+  walk(root);
+  return [...counts.values()].sort((left, right) => right.files - left.files || byCodeUnit(left.extension, right.extension));
 }
 
 function loadConfig(root, configArg) {
@@ -408,6 +471,16 @@ function loadConfig(root, configArg) {
      * 받는 config가 바로 이 객체라 여기 없으면 두 함수 모두 항상 undefined만 본다.
      */
     vendor_exclude: config.vendor_exclude, test_exclude: config.test_exclude,
+    /*
+     * 문자열 디스패치 규칙. 화면이 `/TransData.do?worker=빈&action=메서드` 처럼 부르는 구조는 호출 모양에서
+     * 대부분 추론하지만(inferDispatchRules), 추론이 못 하는 프로젝트를 위해 직접 적을 수 있게 둔다.
+     * 예: [{ "endpoint": "/TransData.do", "bean_param": "worker", "method_param": "action", "method_template": "do{Action}" }]
+     */
+    dispatch_rules: Array.isArray(config.dispatch_rules)
+      ? config.dispatch_rules
+        .filter((item) => item && item.endpoint && item.bean_param && item.method_param)
+        .map((item) => ({ endpoint: String(item.endpoint), bean_param: String(item.bean_param), method_param: String(item.method_param), method_template: String(item.method_template || "do{Action}"), source: "config" }))
+      : [],
   };
 }
 
@@ -518,7 +591,20 @@ function lineOrdered(methods) {
 }
 
 // 문자열과 줄바꿈은 보존하고 주석 문자만 공백으로 바꿔 line/offset을 안정적으로 유지한다.
+/*
+ * SQL 계열은 주석이 `--`이고 문자열 안의 `\`가 이스케이프가 아니다(`'C:\'`가 정상 리터럴).
+ * C 계열 규칙으로 지우면 `-- 옛 로직 UPDATE ...` 같은 주석 처리된 SQL이 살아남고,
+ * `//`를 주석으로 오인해 뒤따르는 코드를 지운다.
+ */
+const PLSQL_EXTENSIONS = new Set(ADAPTERS.find((item) => item.id === "plsql").extensions);
+const SQL_COMMENT_EXTENSIONS = new Set([".sql", ...PLSQL_EXTENSIONS]);
+
+/* PowerScript는 `//` 주석을 쓰지만 문자열 이스케이프가 `~`다(`"~"따옴표~""`). `\`는 경로 문자다. */
+const PB_EXTENSIONS = new Set(ADAPTERS.find((item) => item.id === "powerbuilder").extensions);
+
 function stripComments(text, ext) {
+  const sql = SQL_COMMENT_EXTENSIONS.has(ext);
+  const pb = PB_EXTENSIONS.has(ext);
   let output = "";
   let state = "code";
   let quote = "";
@@ -532,9 +618,11 @@ function stripComments(text, ext) {
       else output += c === "\n" ? "\n" : " ";
     } else if (state === "string") {
       output += c;
-      if (c === "\\") { output += n || ""; i += 1; }
+      if ((pb ? c === "~" : c === "\\" && !sql)) { output += n || ""; i += 1; }
       else if (c === quote) state = "code";
-    } else if (c === "/" && n === "/") {
+    } else if (sql && c === "-" && n === "-") {
+      output += "  "; i += 1; state = "line";
+    } else if (!sql && c === "/" && n === "/") {
       output += "  "; i += 1; state = "line";
     } else if (c === "/" && n === "*") {
       output += "  "; i += 1; state = "block";
@@ -647,10 +735,534 @@ function extractLegacySymbols(text, clean, rel, workspace) {
     if (/^(?:IDENTIFICATION|ENVIRONMENT|DATA|PROCEDURE|WORKING-STORAGE|LINKAGE|END-IF|END-PERFORM)$/i.test(match[1])) continue;
     add(match[1], match.index);
   }
-  const markup = new Set([".jsp", ".jspx", ".tag", ".aspx", ".ascx", ".ashx", ".asmx", ".xaml", ".cshtml", ".vbhtml", ".razor", ".html", ".htm"]);
+  const markup = new Set([".jsp", ".jspx", ".jspf", ".tag", ".aspx", ".ascx", ".ashx", ".asmx", ".xaml", ".cshtml", ".vbhtml", ".razor", ".html", ".htm"]);
+  /*
+   * 화면 안 인라인 `<script>`의 자바스크립트 함수. 예전에는 마크업 파일에서 view 심볼만 만들어
+   * `onclick="fnSave()"`의 대상이 같은 JSP 안에 있어도 찾지 못했다 — 실측(레거시 JSP 1,815개)에서
+   * 미해결 트리거 2,385건이 JSP였다. JSP 스크립틀릿(`<% if (a) { %>`)의 중괄호가 함수 범위를
+   * 망치지 않도록 먼저 같은 길이의 공백으로 지운다. `src=` 외부 스크립트는 그 .js 파일이 따로 인덱싱된다.
+   */
+  const callSites = [];
+  if (markup.has(ext) || ext === ".asp") {
+    const scriptCode = clean.replace(/<%[\s\S]*?%>/g, (block) => block.replace(/[^\n]/g, " "));
+    const scriptMethods = [];
+    for (const block of scriptCode.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi)) {
+      const offset = block.index + block[0].indexOf(">") + 1;
+      const body = block[1];
+      const declaration = /\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{|\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*function\s*\([^)]*\)\s*\{|\b(?:this|window)\.([A-Za-z_$][\w$]*)\s*=\s*function\s*\([^)]*\)\s*\{/g;
+      for (const match of body.matchAll(declaration)) {
+        const name = match[1] || match[2] || match[3];
+        const start = offset + match.index;
+        const end = matchingBrace(scriptCode, scriptCode.indexOf("{", start + match[0].length - 1));
+        const id = symbolId(pkg, "", name);
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        const method = { id, name, owner: "", package: pkg, file: rel, line: atLine(start), start, end, visibility: "unknown", workspace: workspace.id, type: "function" };
+        methods.push(method);
+        scriptMethods.push(method);
+      }
+    }
+    for (const method of scriptMethods) {
+      const body = scriptCode.slice(method.start, method.end);
+      for (const match of body.matchAll(/\b([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?\s*\(/g)) {
+        const name = match[2] || match[1];
+        if (CALL_KEYWORDS.has(name) || (!match[2] && name === method.name && match.index < 120)) continue;
+        if (!match[2] && body.slice(0, match.index).replace(/\s+$/, "").endsWith(".")) continue;
+        callSites.push({ caller: method.id, name, qualifier: match[2] ? match[1] : "", file: rel, line: atLine(method.start + match.index), workspace: workspace.id });
+      }
+    }
+  }
+  /* 이 화면에 함께 실리는 파일(`<%@ include file>`·`<jsp:include page>`). 화면 스크립트의 호출 범위를 정하는 데 쓴다. */
+  const includes = markup.has(ext)
+    ? [...text.matchAll(/<%@\s*include\s+file\s*=\s*["']([^"']+)["']|<jsp:include\s+page\s*=\s*["']([^"'<]+)["']/gi)].map((match) => (match[1] || match[2]).split("?")[0])
+    : [];
+  /*
+   * 이 화면이 불러오는 외부 스크립트(`<script src="<%= JS_PATH %>back/x.js">`). 동적 앞부분은 알 수 없으니
+   * 떼고 뒷부분 경로(`back/x.js`)만 남긴다 — 같은 함수가 html/·mobile/ 사본에 다 있을 때 실제로 실린 쪽을 고른다.
+   */
+  const scripts = markup.has(ext) || ext === ".asp"
+    ? [...text.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)].map((match) => match[1].split(/[?#]/)[0]).filter((value) => /\.\w+$/.test(value))
+    : [];
+  /*
+   * 스크립틀릿 경로 변수(`String JS_PATH = CONTEXT_PATH + conf.getString("BACK_JS_PATH");`).
+   * `<%= JS_PATH %>forms.js`의 앞부분을 설정값(`/html/script/js/`)으로 되살려 html/·mobile/ 사본 중 실린 쪽을 가린다.
+   * 조각: 문자열 리터럴, 설정 키 조회(getString/getProperty), 그 밖의 식(실행해야 아는 값 — 해석 때 버린다).
+   */
+  const pathVars = markup.has(ext)
+    ? [...text.matchAll(/\bString\s+(\w+)\s*=\s*([^;%]+);/g)].map((match) => ({
+      name: match[1],
+      parts: match[2].split("+").map((token) => {
+        const literal = token.trim().match(/^"([^"]*)"$/)?.[1];
+        if (literal !== undefined) return { literal };
+        const key = token.match(/\.get(?:String|Property)\s*\(\s*"([^"]+)"/)?.[1];
+        return key ? { key } : { unknown: true };
+      }),
+    }))
+    : [];
   const symbols = methods.map((method) => ({ id: method.id, type: method.type, file: rel, line: method.line, package: pkg, workspace: workspace.id, origin: "deterministic-indexer", confidence: "MEDIUM" }));
   if (markup.has(ext)) symbols.push({ id: `view:${rel}`, type: "view", file: rel, line: 1, workspace: workspace.id, origin: "deterministic-indexer", confidence: "HIGH" });
-  return { symbols, nodes: symbols.map((item) => ({ ...item })), methods, callSites: [], injects: [], classes: [] };
+  /* 경로형 설정값(`KEY=/html/script/js/`). 값에 `/`가 없는 설정은 스크립트 경로 해석에 쓸 일이 없어 담지 않는다. */
+  const properties = ext === ".properties"
+    ? [...text.matchAll(/^[ \t]*([\w.-]+)[ \t]*[=:][ \t]*(\S*\/\S*)[ \t]*$/gm)].map((match) => [match[1], match[2]])
+    : [];
+  return { symbols, nodes: symbols.map((item) => ({ ...item })), methods, callSites, injects: [], classes: [], includes, scripts, pathVars, properties };
+}
+
+/*
+ * Oracle PL/SQL — 패키지 스펙·바디, 독립 프로시저·함수, 트리거.
+ * PL/SQL은 대소문자를 가리지 않으므로 이름을 대문자로 정규화한다. Java의 `{call pkg_order.save}`와
+ * 바디의 `PROCEDURE Save`가 같은 노드로 이어져야 하기 때문이다. 스키마 접두사(`APP.PKG_ORDER`)는
+ * 스펙에는 붙고 바디에는 안 붙는 식으로 파일마다 달라 id에서 빼고 `package` 필드에만 남긴다.
+ * 바디 안의 멤버 범위는 "다음 멤버 선언 직전까지"로 근사한다 — 중첩 로컬 프로시저는 별도 멤버로 잘린다.
+ */
+const PLSQL_UNIT_DETECT = /\bcreate\s+(?:or\s+replace\s+)?(?:(?:non)?editionable\s+)?(?:package|procedure|function|trigger)\b/i;
+const PLSQL_IDENT = String.raw`"?[A-Za-z][\w$#]*"?`;
+const PLSQL_NAME = String.raw`${PLSQL_IDENT}(?:\s*\.\s*${PLSQL_IDENT})?`;
+const PLSQL_UNIT_RE = new RegExp(
+  String.raw`\bcreate\s+(?:or\s+replace\s+)?(?:(?:non)?editionable\s+)?(package\s+body|package|procedure|function|trigger)\s+(${PLSQL_NAME})`
+  + String.raw`|(?:^|\n)[ \t]*(package\s+body|package)\s+(${PLSQL_NAME})\s+(?:authid\s+\w+\s+)?(?:is|as)\b`,
+  "gi",
+);
+const PLSQL_MEMBER_RE = new RegExp(String.raw`\b(procedure|function)\s+(${PLSQL_IDENT})`, "gi");
+const PLSQL_CALL_PART = String.raw`([A-Za-z][\w$#]*)`;
+const PLSQL_CALL_TAIL = String.raw`(?:\s*\.\s*${PLSQL_CALL_PART})?(?:\s*\.\s*${PLSQL_CALL_PART})?`;
+const PLSQL_CALL_PAREN = new RegExp(String.raw`\b${PLSQL_CALL_PART}${PLSQL_CALL_TAIL}\s*\(`, "g");
+/* 괄호 없는 호출(`log_step;`)은 문장 첫머리에서만 인정한다 — `x := y;`의 `y`를 호출로 보지 않는다. */
+const PLSQL_CALL_BARE = new RegExp(String.raw`(?<=(?:^|;|\b(?:begin|then|else|loop))\s*)\b${PLSQL_CALL_PART}${PLSQL_CALL_TAIL}\s*;`, "gim");
+const PLSQL_CALL_SKIP = new Set(["IF", "ELSIF", "WHILE", "FOR", "IN", "AND", "OR", "NOT", "VALUES", "INTO", "RETURN", "WHEN", "END", "NULL", "COMMIT", "ROLLBACK", "RAISE", "EXIT", "CONTINUE", "BEGIN", "EXCEPTION", "EXISTS", "PROCEDURE", "FUNCTION"]);
+
+function isPlsqlSource(ext, clean) {
+  return PLSQL_EXTENSIONS.has(ext) || (ext === ".sql" && PLSQL_UNIT_DETECT.test(clean));
+}
+
+function plsqlName(raw) {
+  const parts = String(raw).replace(/"/g, "").split(".").map((part) => part.trim().toUpperCase()).filter(Boolean);
+  return { schema: parts.length > 1 ? parts.at(-2) : "", name: parts.at(-1) || "" };
+}
+
+/* 문자열 내용을 공백으로 지운다(길이·줄 보존). 동적 SQL 문자열 속 `SELECT`·`pkg.proc(`를 코드로 읽지 않기 위함. */
+function blankSqlStrings(clean) {
+  return clean.replace(/'(?:[^']|'')*'/g, (match) => `'${match.slice(1, -1).replace(/[^\n]/g, " ")}'`);
+}
+
+/* `PROCEDURE x (...) [RETURN t ...] IS|AS` 면 구현, `;`로 끝나면 선언(스펙·전방 선언)이다. */
+function plsqlIsImplementation(code, afterName) {
+  let i = afterName;
+  while (/\s/.test(code[i] || "")) i += 1;
+  if (code[i] === "(") {
+    const close = matchingParen(code, i);
+    if (close < 0) return false;
+    i = close + 1;
+  }
+  const next = code.slice(i, i + 4000).match(/;|\b(?:is|as)\b/i);
+  return Boolean(next && next[0] !== ";");
+}
+
+function extractPlsqlSymbols(text, clean, rel, workspace) {
+  const atLine = lineIndex(text);
+  const code = blankSqlStrings(clean);
+  const base = { file: rel, workspace: workspace.id, origin: "deterministic-indexer" };
+  const units = [...code.matchAll(PLSQL_UNIT_RE)].map((match) => ({
+    kind: (match[1] || match[3]).toLowerCase().replace(/\s+/g, " "),
+    ...plsqlName(match[2] || match[4]),
+    start: match.index + match[0].search(/\S/),
+    headerEnd: match.index + match[0].length,
+  }));
+  units.forEach((unit, i) => { unit.end = units[i + 1]?.start ?? code.length; });
+
+  const symbols = [];
+  const nodes = [];
+  const methods = [];
+  const addMethod = (name, owner, schema, start, end, type = "method") => {
+    const id = symbolId("", owner, name);
+    methods.push({ id, name, owner, package: schema, file: rel, line: atLine(start), start, end, visibility: "unknown", workspace: workspace.id, type });
+  };
+  for (const unit of units) {
+    const line = atLine(unit.start);
+    const pkgFields = unit.schema ? { package: unit.schema } : {};
+    if (unit.kind === "package" || unit.kind === "package body") {
+      const members = [];
+      for (const match of code.slice(unit.headerEnd, unit.end).matchAll(PLSQL_MEMBER_RE)) {
+        const offset = unit.headerEnd + match.index;
+        members.push({ name: plsqlName(match[2]).name, offset, implemented: plsqlIsImplementation(code, offset + match[0].length) });
+      }
+      const listed = unit.kind === "package" ? members : members.filter((item) => item.implemented);
+      if (unit.kind === "package body") {
+        listed.forEach((member, i) => addMethod(member.name, unit.name, unit.schema, member.offset, listed[i + 1]?.offset ?? unit.end));
+      }
+      symbols.push({
+        id: unit.name, type: "package", line, ...pkgFields, ...base, confidence: "MEDIUM",
+        methods: unique(listed, (item) => item.name).map((item) => ({ name: item.name, id: symbolId("", unit.name, item.name), line: atLine(item.offset), visibility: unit.kind === "package" ? "public" : "unknown" })),
+      });
+      nodes.push({ id: unit.name, type: "package", line, ...base, confidence: "MEDIUM" });
+    } else if (unit.kind === "trigger") {
+      const header = code.slice(unit.headerEnd, Math.min(unit.end, unit.headerEnd + 2000));
+      const timing = header.match(new RegExp(String.raw`\b(?:before|after|instead\s+of|for)\b([\s\S]*?)\bon\s+(${PLSQL_NAME})`, "i"));
+      const events = timing ? [...new Set([...timing[1].matchAll(/\b(insert|update|delete)\b/gi)].map((item) => item[1].toUpperCase()))] : [];
+      addMethod(unit.name, "", unit.schema, unit.start, unit.end, "db_trigger");
+      symbols.push({ id: unit.name, type: "db_trigger", line, ...pkgFields, ...(timing ? { trigger_table: plsqlName(timing[2]).name } : {}), ...(events.length ? { trigger_events: events } : {}), ...base, confidence: "MEDIUM" });
+      nodes.push({ id: unit.name, type: "db_trigger", line, ...base, confidence: "MEDIUM" });
+    } else {
+      addMethod(unit.name, "", unit.schema, unit.start, unit.end);
+      symbols.push({ id: unit.name, type: unit.kind, line, ...pkgFields, ...base, confidence: "MEDIUM" });
+    }
+  }
+  /* 오버로드는 같은 id로 여러 범위를 갖는다 — 범위는 모두 남기고 노드는 하나만 만든다. */
+  for (const method of unique(methods.filter((item) => item.type === "method"), (item) => item.id)) {
+    nodes.push({ id: method.id, type: "method", line: method.line, visibility: method.visibility, ...base, confidence: "MEDIUM" });
+  }
+
+  const callSites = [];
+  for (const method of methods) {
+    const body = code.slice(method.start, method.end);
+    for (const regex of [PLSQL_CALL_PAREN, PLSQL_CALL_BARE]) {
+      for (const match of body.matchAll(regex)) {
+        const parts = [match[1], match[2], match[3]].filter(Boolean).map((part) => part.toUpperCase());
+        const name = parts.at(-1);
+        if (PLSQL_CALL_SKIP.has(parts[0]) || PLSQL_CALL_SKIP.has(name)) continue;
+        if (name === method.name && match.index < 200) continue;
+        callSites.push({ caller: method.id, name, qualifier: parts.length > 1 ? parts.at(-2) : "", file: rel, line: atLine(method.start + match.index), workspace: workspace.id });
+      }
+    }
+  }
+  return { symbols, nodes, methods, callSites, injects: [], fields: [], classes: [] };
+}
+
+/*
+ * PL/SQL 본문의 정적 SQL. 문자열이 아니라 맨 문장이라 extractSql의 리터럴 스캔이 못 잡는다.
+ * 멤버 본문 안의 문장만 인정한다 — 같은 .sql에 섞인 시드 데이터 INSERT 수천 줄은 사용처가 아니다.
+ * `SELECT a INTO v_a FROM t`의 INTO 절, `RETURNING id INTO v_id`는 테이블이 아니므로 떼고 센다.
+ */
+function extractPlsqlSql(text, clean, rel, methods) {
+  const atLine = lineIndex(text);
+  const code = blankSqlStrings(clean);
+  const sqls = [];
+  const usages = [];
+  const relations = [];
+  let consumed = 0;
+  for (const match of code.matchAll(/\b(select|insert|update|delete|merge)\b/gi)) {
+    if (match.index < consumed) continue;
+    const owner = enclosingMethod(methods, match.index);
+    if (!owner) continue;
+    let back = match.index - 1;
+    while (back >= 0 && /\s/.test(code[back])) back -= 1;
+    const open = code[back] === "(" ? back : -1;
+    const close = open >= 0 ? matchingParen(code, open) : -1;
+    const semicolon = code.indexOf(";", match.index);
+    const end = close >= 0 ? close : semicolon >= 0 ? semicolon : owner.end;
+    let statement = code.slice(match.index, end);
+    /* 오라클은 `DELETE tbl WHERE ...`처럼 FROM을 생략할 수 있다. 트리거 머리의 `DELETE ON`·`DELETE OR`는 제외. */
+    if (/^delete\s+(?!from\b|on\b|or\b)[\w.$"]+/i.test(statement)) statement = statement.replace(/^delete\s+/i, "DELETE FROM ");
+    const type = sqlStatementType(statement);
+    if (!type) continue;
+    consumed = end;
+    const forTables = type === "select"
+      ? statement.replace(/\b(?:bulk\s+collect\s+)?into\b[\s\S]*?(?=\bfrom\b)/i, " ")
+      : statement.replace(/\breturning\b[\s\S]*$/i, " ");
+    const using = type === "merge" ? [...forTables.matchAll(/\busing\s+([\w.$"]+)/gi)].map((item) => item[1].replace(/"/g, "")) : [];
+    const line = atLine(match.index);
+    const id = `${rel}:${line}:plsql`;
+    sqls.push({ id, file: rel, line, type, tables: [...new Set([...sqlTables(forTables), ...using])], text_preview: clean.slice(match.index, end).replace(/\s+/g, " ").trim().slice(0, 240), origin: "deterministic-indexer", confidence: "MEDIUM" });
+    relations.push(...extractSqlRelations(forTables, { sql_id: id, file: rel, line }));
+    usages.push({ sql_id: id, file: rel, line, method: owner.id, evidence: "PL/SQL 본문 내 정적 SQL", origin: "deterministic-indexer", confidence: "HIGH" });
+  }
+  return { sqls, usages, relations };
+}
+
+/*
+ * Oracle Pro*C — C 배치 프로그램에 `EXEC SQL`을 섞은 형식. 제조·정산 야간 배치에 흔하다.
+ * 함수 id는 파일 경로를 접두사로 쓴다(`batch.order_close.main`) — `main`·`db_connect`·`err_exit`가
+ * 배치 파일마다 있어 이름만으로는 전부 충돌한다. EXEC SQL 블록은 함수·호출을 찾기 전에 지워
+ * `NVL(`·`TO_CHAR(`를 C 호출로 읽지 않는다.
+ */
+const PROC_EXTENSIONS = new Set(ADAPTERS.find((item) => item.id === "proc").extensions);
+const C_KEYWORDS = new Set(["if", "for", "while", "switch", "return", "sizeof", "else", "do", "case", "defined", "typedef"]);
+const C_FUNCTION_RE = /^[ \t]*(?:[A-Za-z_][\w \t*]*[\s*])?([A-Za-z_]\w*)[ \t]*\(([^;{}]*)\)\s*\{/gm;
+
+/* `EXEC SQL ... ;` 블록. `EXEC SQL EXECUTE ... END-EXEC;`는 안에 `;`가 있으므로 END-EXEC까지 본다. */
+function execSqlBlocks(clean) {
+  const blocks = [];
+  const re = /\bEXEC\s+SQL\b/gi;
+  let match;
+  while ((match = re.exec(clean))) {
+    const after = match.index + match[0].length;
+    const executeBlock = /^\s*(?:AT\s+:?[\w$]+\s+)?EXECUTE\b(?!\s+IMMEDIATE)/i.test(clean.slice(after, after + 80));
+    const endExec = executeBlock ? clean.slice(after).search(/\bEND-EXEC\b/i) : -1;
+    const stop = endExec >= 0 ? after + endExec : clean.indexOf(";", after);
+    const end = stop < 0 ? clean.length : clean.indexOf(";", stop) + 1 || clean.length;
+    blocks.push({ start: match.index, end, body: clean.slice(after, endExec >= 0 ? after + endExec : stop < 0 ? clean.length : stop).trim(), execute: executeBlock });
+    re.lastIndex = end;
+  }
+  return blocks;
+}
+
+function extractProcSymbols(text, clean, rel, workspace) {
+  const atLine = lineIndex(text);
+  const blocks = execSqlBlocks(clean);
+  let code = clean;
+  for (const block of blocks) code = code.slice(0, block.start) + code.slice(block.start, block.end).replace(/[^\n]/g, " ") + code.slice(block.end);
+  const pkg = rel.replace(/\.[^.]+$/, "").replaceAll("/", ".");
+  const methods = [];
+  let consumed = 0;
+  for (const match of code.matchAll(C_FUNCTION_RE)) {
+    if (match.index < consumed || C_KEYWORDS.has(match[1])) continue;
+    const open = code.indexOf("{", match.index + match[0].length - 1);
+    const end = matchingBrace(code, open);
+    consumed = end;
+    const start = match.index + match[0].search(/\S/);
+    methods.push({ id: symbolId(pkg, "", match[1]), name: match[1], owner: "", package: pkg, file: rel, line: atLine(start), start, end, visibility: /\bstatic\b/.test(match[0].slice(0, match[0].indexOf(match[1]))) ? "private" : "public", workspace: workspace.id });
+  }
+  const base = { file: rel, workspace: workspace.id, origin: "deterministic-indexer", confidence: "MEDIUM" };
+  const symbols = methods.map((method) => ({ id: method.id, type: "function", line: method.line, package: pkg, ...base }));
+  const nodes = methods.map((method) => ({ id: method.id, type: "method", line: method.line, visibility: method.visibility, ...base }));
+  const callSites = [];
+  for (const method of methods) {
+    const body = code.slice(method.start, method.end);
+    for (const match of body.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)) {
+      if (C_KEYWORDS.has(match[1]) || (match[1] === method.name && match.index < 200)) continue;
+      /* `ctx->fn(`·`s.fn(`은 함수 포인터·구조체 멤버라 대상을 모른다. */
+      if (/(?:->|\.)\s*$/.test(body.slice(Math.max(0, match.index - 3), match.index))) continue;
+      callSites.push({ caller: method.id, name: match[1], qualifier: "", file: rel, line: atLine(method.start + match.index), workspace: workspace.id });
+    }
+  }
+  /* `EXEC SQL EXECUTE BEGIN pkg.proc(:a); END; END-EXEC;`·`EXEC SQL CALL pkg.proc(:a);` → PL/SQL 프로시저 호출 */
+  for (const block of blocks) {
+    const caller = enclosingMethod(methods, block.start);
+    if (!caller) continue;
+    const inner = block.body.replace(/^(?:AT\s+:?[\w$]+\s+)?(?:EXECUTE\b|CALL\b)/i, (keyword) => (/call/i.test(keyword) ? "{call " : ""));
+    if (!block.execute && !/^\{call /i.test(inner)) continue;
+    const target = inner.match(PROCEDURE_CALL_TEXT)?.[1];
+    if (target) callSites.push({ caller: caller.id, ...procedureTarget(target), file: rel, line: atLine(block.start), workspace: workspace.id });
+  }
+  return { symbols, nodes, methods, callSites, injects: [], fields: [], classes: [] };
+}
+
+/* EXEC SQL의 정적 SQL. 호스트 변수(`:v_id`)는 테이블 판정에 영향이 없고, `INTO :a, :b`는 떼고 센다. */
+function extractProcSql(text, clean, rel, methods) {
+  const atLine = lineIndex(text);
+  const sqls = [];
+  const usages = [];
+  const relations = [];
+  for (const block of execSqlBlocks(clean)) {
+    if (block.execute) continue;
+    const owner = enclosingMethod(methods, block.start);
+    if (!owner) continue;
+    let statement = block.body.replace(/^(?:AT\s+:?[\w$]+\s+)?(?:FOR\s+:?[\w$]+\s+)?/i, "").replace(/^DECLARE\s+[\w$]+\s+CURSOR\s+FOR\s+/i, "");
+    if (/^delete\s+(?!from\b)[\w.$"]+/i.test(statement)) statement = statement.replace(/^delete\s+/i, "DELETE FROM ");
+    const type = sqlStatementType(statement);
+    if (!type) continue;
+    const forTables = type === "select"
+      ? statement.replace(/\b(?:bulk\s+collect\s+)?into\b[\s\S]*?(?=\bfrom\b)/i, " ")
+      : statement.replace(/\breturning\b[\s\S]*$/i, " ");
+    const line = atLine(block.start);
+    const id = `${rel}:${line}:proc`;
+    sqls.push({ id, file: rel, line, type, tables: [...new Set(sqlTables(forTables))], text_preview: statement.replace(/\s+/g, " ").slice(0, 240), origin: "deterministic-indexer", confidence: "MEDIUM" });
+    relations.push(...extractSqlRelations(forTables, { sql_id: id, file: rel, line }));
+    usages.push({ sql_id: id, file: rel, line, method: owner.id, evidence: "Pro*C EXEC SQL", origin: "deterministic-indexer", confidence: "HIGH" });
+  }
+  return { sqls, usages, relations };
+}
+
+/*
+ * PowerBuilder 텍스트 내보내기(.srw·.sru·.srf·.srm·.sra·.srd).
+ * PowerScript는 대소문자를 가리지 않아 이름을 소문자로 정규화한다. id는 `전역객체.컨트롤.이벤트`
+ * (`w_order.cb_save.clicked`)·`전역객체.함수`(`w_order.wf_save`)다 — PowerBuilder 객체 이름은
+ * 라이브러리 목록 안에서 유일해서 파일 경로 접두사가 필요 없다. 스크립트 소유자는 "그 앞의 마지막
+ * `type X from Y within Z` 선언"이다(내보내기 형식이 컨트롤 선언 뒤에 그 컨트롤 이벤트를 둔다).
+ * DataWindow(.srd)는 retrieve SQL·update 테이블을 SQL로 등록하고, 윈도의 `dw_1.Retrieve()`를
+ * dataobject로 되짚어 그 SQL의 사용처로 잇는다.
+ */
+const PB_TYPE_RE = /^[ \t]*(global\s+)?type\s+(\w+)\s+from\s+([\w`.]+)(?:\s+within\s+(\w+))?/gim;
+const PB_SCRIPT_RES = [
+  /^[ \t]*(?:(?:public|private|protected|global)\s+)?function\s+[\w.]+(?:\s*\[\s*\])?\s+(\w+)\s*\([^)\n]*\)[^;\n]*;/gim,
+  /^[ \t]*(?:(?:public|private|protected|global)\s+)?subroutine\s+(\w+)\s*\([^)\n]*\)[^;\n]*;/gim,
+  /^[ \t]*event\s+(?:type\s+[\w.]+\s+)?(\w+)\s*(?:\([^)\n]*\))?[^;\n]*;/gim,
+];
+const PB_KEYWORDS = new Set(["if", "elseif", "choose", "case", "for", "while", "until", "return", "create", "destroy", "and", "or", "not", "halt", "call", "event", "function"]);
+
+function blankPbStrings(clean) {
+  return clean.replace(/"(?:~.|[^"~\n])*"|'(?:~.|[^'~\n])*'/g, (match) => `${match[0]}${match.slice(1, -1).replace(/[^\n]/g, " ")}${match.at(-1)}`);
+}
+
+function extractPbDataWindow(text, rel) {
+  const name = basename(rel).replace(/\.[^.]+$/, "").toLowerCase();
+  const atLine = lineIndex(text);
+  const sqls = [];
+  const retrieve = text.match(/\bretrieve\s*=\s*"((?:~.|[^"~])*)"/i);
+  const unescape = (value) => value.replace(/~"/g, "\"").replace(/~[rnt]/gi, " ").replace(/~~/g, "~");
+  if (retrieve) {
+    const value = unescape(retrieve[1]);
+    const pbselect = /^\s*PBSELECT\s*\(/i.test(value);
+    const tables = pbselect
+      ? [...value.matchAll(/TABLE\s*\(\s*NAME\s*=\s*"([^"]+)"/gi)].map((item) => item[1])
+      : sqlTables(value);
+    if (pbselect || sqlStatementType(value) === "select") {
+      sqls.push({ id: name, file: rel, line: atLine(retrieve.index), type: "select", tables: [...new Set(tables)], text_preview: value.replace(/\s+/g, " ").trim().slice(0, 240), origin: "deterministic-indexer", confidence: "MEDIUM" });
+    }
+  }
+  /* DataWindow.Update()가 쓰는 테이블. retrieve 값 안의 `update` 단어와 섞이지 않게 값을 지우고 찾는다. */
+  const updateTable = (retrieve ? text.replace(retrieve[0], "") : text).match(/\bupdate\s*=\s*"([\w.$#]+)"/i)?.[1];
+  if (updateTable) sqls.push({ id: `${name}:update`, file: rel, line: 1, type: "update", tables: [updateTable], text_preview: `DataWindow ${name} Update() → ${updateTable}`, origin: "deterministic-indexer", confidence: "MEDIUM" });
+  const symbols = [{ id: name, type: "datawindow", file: rel, line: 1, origin: "deterministic-indexer", confidence: "MEDIUM" }];
+  return { symbols, nodes: [], methods: [], callSites: [], injects: [], fields: [], classes: [], sqlFacts: { sqls, usages: [], relations: [] } };
+}
+
+function extractPbSymbols(text, clean, rel, workspace) {
+  if (extname(rel).toLowerCase() === ".srd") return extractPbDataWindow(text, rel);
+  const atLine = lineIndex(text);
+  const code = blankPbStrings(clean);
+  const types = [...code.matchAll(PB_TYPE_RE)].map((match) => ({ name: match[2].toLowerCase(), base: match[3].toLowerCase(), global: Boolean(match[1]), start: match.index }));
+  const globalName = types.find((item) => item.global)?.name || basename(rel).replace(/\.[^.]+$/, "").toLowerCase();
+  const ownerAt = (offset) => {
+    let last = null;
+    for (const item of types) if (item.start < offset) last = item; else break;
+    return !last || last.name === globalName ? globalName : `${globalName}.${last.name}`;
+  };
+  const ends = [...code.matchAll(/^[ \t]*end\s+(?:function|subroutine|event)\b/gim)].map((match) => match.index);
+  const methods = [];
+  for (const [index, regex] of PB_SCRIPT_RES.entries()) {
+    /* 이벤트 스크립트(clicked·open 등)는 런타임이 부른다 — 호출처가 없어도 dead code가 아니므로 노드 종류를 나눈다. */
+    const type = index === 2 ? "pb_event" : "method";
+    for (const match of code.matchAll(regex)) {
+      const start = match.index + match[0].search(/\S/);
+      const end = ends.find((offset) => offset > start) ?? code.length;
+      const name = match[1].toLowerCase();
+      const owner = ownerAt(start);
+      methods.push({ id: symbolId("", owner, name), name, owner, package: "", file: rel, line: atLine(start), start, bodyStart: match.index + match[0].length, end, visibility: /^\s*private\b/i.test(match[0]) ? "private" : "public", workspace: workspace.id, type });
+    }
+  }
+  methods.sort((left, right) => left.start - right.start);
+
+  /* 컨트롤 → dataobject. 선언 블록의 `string dataobject = "d_x"`와 실행 중 `dw_1.dataobject = "d_x"` 둘 다. */
+  const dataobjectOf = new Map();
+  for (const item of types) {
+    const blockEnd = code.slice(item.start).search(/^[ \t]*end\s+type\b/im);
+    const block = clean.slice(item.start, blockEnd < 0 ? clean.length : item.start + blockEnd);
+    const value = block.match(/\bdataobject\s*=\s*"(\w+)"/i)?.[1];
+    if (value) dataobjectOf.set(item.name, value.toLowerCase());
+  }
+  for (const match of clean.matchAll(/\b(\w+)\s*\.\s*dataobject\s*=\s*"(\w+)"/gi)) dataobjectOf.set(match[1].toLowerCase(), match[2].toLowerCase());
+
+  const callSites = [];
+  const usages = [];
+  const sqls = [];
+  const relations = [];
+  const push = (method, offset, name, qualifier) => {
+    if (!name || PB_KEYWORDS.has(name)) return;
+    callSites.push({ caller: method.id, name, qualifier, file: rel, line: atLine(offset), workspace: workspace.id });
+  };
+  for (const method of methods) {
+    const control = method.owner.includes(".") ? method.owner.split(".").at(-1) : "";
+    /* `this.`는 스크립트 소유자, `parent.`는 컨트롤이 속한 전역 객체다. */
+    const qualifierOf = (raw) => {
+      const value = (raw || "").toLowerCase();
+      if (value === "this") return method.owner;
+      if (value === "parent") return globalName;
+      return value === "super" ? "" : value;
+    };
+    const body = code.slice(method.bodyStart, method.end);
+    const bodyClean = clean.slice(method.bodyStart, method.end);
+    for (const match of body.matchAll(/\b(?:(\w+)\s*\.\s*)?(\w+)\s*\(/g)) {
+      if (/\bevent\s*$/i.test(body.slice(Math.max(0, match.index - 12), match.index))) continue;
+      push(method, method.bodyStart + match.index, match[2].toLowerCase(), qualifierOf(match[1]));
+    }
+    for (const match of body.matchAll(/\b(?:(\w+)\s*\.\s*)?event\s+(?:trigger\s+|post\s+)?(\w+)\s*\(/gi)) push(method, method.bodyStart + match.index, match[2].toLowerCase(), qualifierOf(match[1]));
+    for (const match of bodyClean.matchAll(/\b(?:(\w+)\s*\.\s*)?(?:triggerevent|postevent)\s*\(\s*"(\w+)"/gi)) push(method, method.bodyStart + match.index, match[2].toLowerCase(), qualifierOf(match[1]));
+    for (const match of body.matchAll(/\b(\w+)\s*\.\s*(retrieve|update)\s*\(/gi)) {
+      const target = match[1].toLowerCase() === "this" ? control : match[1].toLowerCase();
+      const dataobject = dataobjectOf.get(target);
+      if (!dataobject) continue;
+      usages.push({ sql_id: /update/i.test(match[2]) ? `${dataobject}:update` : dataobject, file: rel, line: atLine(method.bodyStart + match.index), method: method.id, evidence: `DataWindow ${target}.${match[2]}()`, origin: "deterministic-indexer", confidence: "MEDIUM" });
+    }
+    /* 임베디드 SQL은 줄 첫머리에서 시작해 `;`로 끝난다. `DECLARE p PROCEDURE FOR pkg.proc(:a)`는 프로시저 호출이다. */
+    let consumed = 0;
+    for (const match of body.matchAll(/^[ \t]*(select|insert|update|delete|declare)\b/gim)) {
+      const offset = method.bodyStart + match.index + match[0].length - match[1].length;
+      /* `DECLARE c CURSOR FOR` 다음 줄의 `SELECT`·INSERT … SELECT를 두 번 세지 않는다. */
+      if (offset < consumed) continue;
+      const semicolon = code.indexOf(";", offset);
+      consumed = semicolon < 0 || semicolon > method.end ? method.end : semicolon;
+      let statement = code.slice(offset, consumed).replace(/\busing\s+\w+\s*$/i, "").trim();
+      const procedure = statement.match(/^declare\s+\w+\s+procedure\s+for\s+([\w$#.]+)/i)?.[1];
+      if (procedure) { callSites.push({ caller: method.id, ...procedureTarget(procedure), file: rel, line: atLine(offset), workspace: workspace.id }); continue; }
+      statement = statement.replace(/^declare\s+\w+\s+cursor\s+for\s+/i, "");
+      if (/^delete\s+(?!from\b)[\w.$"]+/i.test(statement)) statement = statement.replace(/^delete\s+/i, "DELETE FROM ");
+      const type = sqlStatementType(statement);
+      if (!type) continue;
+      const forTables = type === "select" ? statement.replace(/\binto\b[\s\S]*?(?=\bfrom\b)/i, " ") : statement;
+      const line = atLine(offset);
+      const id = `${rel}:${line}:pb`;
+      sqls.push({ id, file: rel, line, type, tables: [...new Set(sqlTables(forTables))], text_preview: clean.slice(offset, offset + statement.length).replace(/\s+/g, " ").slice(0, 240), origin: "deterministic-indexer", confidence: "MEDIUM" });
+      relations.push(...extractSqlRelations(forTables, { sql_id: id, file: rel, line }));
+      usages.push({ sql_id: id, file: rel, line, method: method.id, evidence: "PowerScript 임베디드 SQL", origin: "deterministic-indexer", confidence: "HIGH" });
+    }
+  }
+  const base = { file: rel, workspace: workspace.id, origin: "deterministic-indexer", confidence: "MEDIUM" };
+  const symbols = [{
+    id: globalName, type: "pb_object", line: types.find((item) => item.global) ? atLine(types.find((item) => item.global).start) : 1, ...base,
+    methods: unique(methods, (item) => item.id).map((item) => ({ name: item.name, id: item.id, line: item.line, visibility: item.visibility })),
+  }];
+  /* 전역 함수(.srf `from function_object`)는 함수 자체가 객체다 — 객체 노드를 두면 `f_log(...)` 호출 후보가 둘이 된다. */
+  const functionObject = types.find((item) => item.global)?.base === "function_object";
+  const nodes = [
+    ...(functionObject ? [] : [{ id: globalName, type: "pb_object", line: symbols[0].line, ...base }]),
+    ...unique(methods, (item) => item.id).map((item) => ({ id: item.id, type: item.type, line: item.line, visibility: item.visibility, ...base })),
+  ];
+  return { symbols, nodes, methods, callSites, injects: [], fields: [], classes: [], sqlFacts: { sqls, usages, relations } };
+}
+
+/* `{call PKG.PROC(?)}`·`{? = call F(?)}`·`BEGIN PKG.PROC(?); END;` — JDBC·MyBatis·ADO.NET이 프로시저를 부르는 모양. */
+const PROCEDURE_CALL_TEXT = new RegExp(String.raw`^\s*(?:\{\s*(?:\?\s*=\s*)?call\s+|begin\s+)((?:${PLSQL_IDENT}\s*\.\s*){0,2}${PLSQL_IDENT})\s*[(;}]`, "i");
+
+function procedureTarget(raw) {
+  const parts = String(raw).replace(/"/g, "").split(".").map((part) => part.trim().toUpperCase()).filter(Boolean);
+  return { name: parts.at(-1), qualifier: parts.length > 1 ? parts.at(-2) : "", procedure: true };
+}
+
+/*
+ * 본문 없이 `;`로 끝나는 메서드 선언 — interface 멤버와 `abstract` 메서드(Java·C#).
+ *
+ * 메서드 정규식은 본문 `{`가 있어야 잡는다. 그래서 `void insertSample(SampleVO vo);` 같은
+ * MyBatis Mapper 인터페이스 메서드가 통째로 빠져 `sampleMapper.insertSample(vo)` 호출이 갈 곳이
+ * 없었고, Service → Mapper → SQL 연결이 끊겨 SQL 연결률이 0%였다(2026-09-28 전자정부 표준
+ * 샘플 egovframe-web-sample 실측). Mapper 는 구현 클래스가 없어 호출의 종착점이 이 선언이다.
+ *
+ * 클래스 본문의 최상위만 본다. 중첩 블록(default 메서드 본문 · 중첩 클래스 · 초기화 블록)은
+ * 지우고 그 끝을 문장 경계로 삼아, 본문 안의 `return foo(x);`를 선언으로 읽지 않는다.
+ */
+const ABSTRACT_DECLARATION = /^\s*((?:(?:public|protected|private|internal|abstract|static|default|virtual|new|unsafe)\s+)*)(?:<[^>;{}]*>\s*)?[\w$.]+(?:\s*<[^;=(){}]*>)?(?:\s*\[\s*\])*\??\s+(\w+)\s*\([^;{}]*\)\s*(?:throws\s+[\w.,\s]+)?$/d;
+const DECLARATION_ANNOTATION = /@[\w.]+(?:\s*\((?:[^()]|\([^()]*\))*\))?/g;
+
+function abstractMethodDeclarations(clean, classes) {
+  const found = [];
+  const text = clean.replace(/"(?:\\.|[^"\\\n])*"/g, (literal) => `"${" ".repeat(literal.length - 2)}"`);
+  for (const item of classes) {
+    if (item.type !== "interface" && item.type !== "class") continue;
+    const open = text.indexOf("{", item.start);
+    if (open < 0 || open >= item.end) continue;
+    let top = "";
+    let depth = 0;
+    for (let i = open + 1; i < item.end && i < text.length; i += 1) {
+      const c = text[i];
+      if (c === "{") { depth += 1; top += " "; }
+      else if (c === "}") { depth -= 1; top += depth === 0 ? ";" : " "; }
+      else top += depth > 0 && c !== "\n" ? " " : c;
+    }
+    let segmentStart = 0;
+    for (let i = 0; i < top.length; i += 1) {
+      if (top[i] !== ";") continue;
+      const segment = top.slice(segmentStart, i)
+        .replace(DECLARATION_ANNOTATION, (annotation) => " ".repeat(annotation.length))
+        .replace(/^(\s*)((?:\[[^\]]*\]\s*)+)/, (_, lead, attributes) => lead + " ".repeat(attributes.length));
+      const match = segment.match(ABSTRACT_DECLARATION);
+      if (match && (item.type === "interface" || /\babstract\b/.test(match[1]))) {
+        const visibility = match[1].match(/\b(public|protected|private|internal)\b/)?.[1] || (item.type === "interface" ? "public" : "package");
+        found.push({ name: match[2], index: open + 1 + segmentStart + match.indices[2][0], visibility });
+      }
+      segmentStart = i + 1;
+    }
+  }
+  return found;
 }
 
 /*
@@ -662,6 +1274,9 @@ function extractLegacySymbols(text, clean, rel, workspace) {
  */
 function extractSymbols(text, clean, rel, workspace) {
   const ext = extname(rel).toLowerCase();
+  if (isPlsqlSource(ext, clean)) return extractPlsqlSymbols(text, clean, rel, workspace);
+  if (PROC_EXTENSIONS.has(ext)) return extractProcSymbols(text, clean, rel, workspace);
+  if (PB_EXTENSIONS.has(ext)) return extractPbSymbols(text, clean, rel, workspace);
   if (!STRUCTURED_SOURCE_EXTENSIONS.includes(ext)) {
     return extractLegacySymbols(text, clean, rel, workspace);
   }
@@ -738,6 +1353,16 @@ function extractSymbols(text, clean, rel, workspace) {
      */
     const methodRegex = /\b(public|protected|private|internal)?\s*(?:static\s+|final\s+|abstract\s+|synchronized\s+|override\s+|open\s+|suspend\s+|async\s+)*(?:fun\s+)?(?:[\w<>,.?\[\]]+\s+)?(?<!@)\b(\w+)\s*\([^;{}]*\)\s*(?:throws\s+[^\n{]+)?\s*\{/gm;
     for (const match of clean.matchAll(methodRegex)) pushMethod(match[2], match.index, clean.indexOf("{", match.index), match[1] || "package");
+    if (ext === ".java" || ext === ".cs") {
+      for (const item of abstractMethodDeclarations(clean, classes)) {
+        const owner = ownerAt(item.index);
+        const id = symbolId(pkg, owner, item.name);
+        const line = atLine(item.index);
+        if (!owner || CALL_KEYWORDS.has(item.name) || seenMethods.has(`${id}@${line}`)) continue;
+        seenMethods.add(`${id}@${line}`);
+        methods.push({ id, name: item.name, owner, package: pkg, file: rel, line, start: item.index, end: item.index, visibility: item.visibility, abstract: true, workspace: workspace.id });
+      }
+    }
   } else if (JS_FAMILY_EXTENSIONS.includes(ext)) {
     /*
      * TypeScript 반환 타입 주석(`): Promise<Order> {`)을 허용한다.
@@ -808,7 +1433,7 @@ function extractSymbols(text, clean, rel, workspace) {
   const symbols = classes.map((item) => ({
     id: symbolId(pkg, "", item.name), type: item.type, file: rel, line: item.line, package: pkg,
     ...(item.extends ? { extends: item.extends } : {}), ...(item.implements.length ? { implements: item.implements } : {}),
-    methods: (methodsByOwner.get(item.name) || []).map((method) => ({ name: method.name, id: method.id, line: method.line, visibility: method.visibility })),
+    methods: (methodsByOwner.get(item.name) || []).map((method) => ({ name: method.name, id: method.id, line: method.line, visibility: method.visibility, ...(method.abstract ? { abstract: true } : {}) })),
     workspace: workspace.id, origin: "deterministic-indexer", confidence: "HIGH",
   }));
   for (const method of methods.filter((item) => !item.owner)) {
@@ -816,7 +1441,7 @@ function extractSymbols(text, clean, rel, workspace) {
   }
   const nodes = [
     ...classes.map((item) => ({ id: symbolId(pkg, "", item.name), type: item.type, file: rel, line: item.line, workspace: workspace.id, origin: "deterministic-indexer", confidence: "HIGH" })),
-    ...methods.map((item) => ({ id: item.id, type: "method", file: rel, line: item.line, visibility: item.visibility, workspace: workspace.id, origin: "deterministic-indexer", confidence: "HIGH" })),
+    ...methods.map((item) => ({ id: item.id, type: "method", file: rel, line: item.line, visibility: item.visibility, ...(item.abstract ? { abstract: true } : {}), workspace: workspace.id, origin: "deterministic-indexer", confidence: "HIGH" })),
   ];
   const callSites = [];
   const callRegex = /\b([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?\s*\(/g;
@@ -843,7 +1468,9 @@ function extractSymbols(text, clean, rel, workspace) {
     const owner = ownerAt(match.index);
     /* 필드 *이름*(match[2])도 함께 남긴다 — `sqlSession.insert(...)`처럼 한정자로 호출할 때
      * 그 한정자가 어떤 타입인지 되짚는 유일한 근거다. 예전에는 타입만 쓰고 이름을 버렸다. */
-    if (owner) injects.push({ owner: symbolId(pkg, "", owner), targetName: match[1].split(".").at(-1), fieldName: match[2], file: rel, line: atLine(match.index), workspace: workspace.id });
+    /* `@Resource(name = "egovIdGnrService")` — XML 빈을 이름으로 찾을 때 쓴다(없으면 필드 이름이 빈 이름이다). */
+    const beanName = match[0].match(/@Resource\s*\([^)]*\bname\s*=\s*"([^"]+)"/)?.[1];
+    if (owner) injects.push({ owner: symbolId(pkg, "", owner), targetName: match[1].split(".").at(-1), fieldName: match[2], ...(beanName ? { beanName } : {}), file: rel, line: atLine(match.index), workspace: workspace.id });
   }
   /*
    * 주입 애너테이션이 없는 평범한 필드 선언도 한정자 해석에 쓴다(레거시는 애너테이션 없이
@@ -910,7 +1537,24 @@ function extractSymbols(text, clean, rel, workspace) {
       }
     }
   }
-  return { symbols, nodes, methods, callSites, injects, fields, classes };
+  /*
+   * 메서드 안의 지역 변수·파라미터 선언 타입(`UserSession user = ...`, `(Map param)`).
+   * fieldTypes는 필드만 추적해서 `user.getUserNo()`처럼 지역 변수를 한정자로 쓰는 호출이 전부
+   * 부분 문자열 근사로 갔다 — 실측(레거시 Java 600파일)에서 미해결 1,074건이 이 한 패턴이었다.
+   * 같은 이름을 if/else 블록마다 다른 타입으로 선언하는 코드가 흔해서(`ExcelReader excel` / `ExcelRead excel`)
+   * 선언 줄을 함께 남기고, 해석 때 호출 줄 바로 앞의 가장 가까운 선언을 쓴다.
+   */
+  const locals = [];
+  if ([".java", ".cs"].includes(ext)) {
+    for (const method of methods) {
+      /* 문자열 안의 `"User name = "`를 선언으로 읽지 않게 리터럴 내용을 먼저 지운다(길이는 보존). */
+      const body = clean.slice(method.start, method.end).replace(/"(?:\\.|[^"\\\n])*"/g, (literal) => `"${" ".repeat(literal.length - 2)}"`);
+      for (const match of body.matchAll(/\b([A-Z]\w*)(?:<[^;=(){}]*?>)?(?:\[\])?\s+([a-z_$][\w$]*)\s*(?=[=;,):])/g)) {
+        locals.push({ method: method.id, name: match[2], typeName: match[1], line: atLine(method.start + match.index) });
+      }
+    }
+  }
+  return { symbols, nodes, methods, callSites, injects, fields, classes, locals };
 }
 
 function extractBindings(text, clean, rel, workspace, methods) {
@@ -921,8 +1565,14 @@ function extractBindings(text, clean, rel, workspace, methods) {
   };
   const dotnetEvent = /(?:this\.)?([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\+=\s*(?:new\s+[\w.]+(?:<[^>]+>)?\s*\(\s*)?(?:this\.)?([A-Za-z_]\w*)/g;
   for (const match of clean.matchAll(dotnetEvent)) add(`${match[1]}.${match[2]}`, match[3], "ui_event", match.index);
-  const markupEvent = /<([A-Za-z_:][\w:.-]*)\b[^>]*\b(?:OnClick|Click|OnCommand|Command)\s*=\s*["'](?:\{Binding\s+)?([A-Za-z_]\w*)[^"']*["']/gi;
-  for (const match of text.matchAll(markupEvent)) add(`${match[1]}.${match[2]}`, match[2], "markup_event", match.index);
+  /*
+   * `onclick="javascript:fnSave();"`·`onclick="return fnCheck()"`의 `javascript`·`return`을 핸들러로
+   * 읽고 있었다 — 실측(레거시 JSP 1,815개)에서 미해결 트리거 937건이 `javascript` 하나였다.
+   * 접두어를 건너뛰고, `self.close()`·`window.open()`처럼 이름 뒤에 `.`이 오는 브라우저 객체 호출은
+   * 이벤트 핸들러 바인딩이 아니므로 뺀다.
+   */
+  const markupEvent = /<([A-Za-z_:][\w:.-]*)\b[^>]*\b(?:OnClick|Click|OnCommand|Command)\s*=\s*["'](?:\{Binding\s+)?\s*(?:javascript\s*:\s*)?(?:return\s+)?([A-Za-z_]\w*)(\s*\.)?[^"']*["']/gi;
+  for (const match of text.matchAll(markupEvent)) if (!match[3]) add(`${match[1]}.${match[2]}`, match[2], "markup_event", match.index);
   const jsxEvent = /\b(on[A-Z][A-Za-z0-9_]*)\s*=\s*\{\s*(?:this\.)?([A-Za-z_$][\w$]*)\s*\}/g;
   for (const match of text.matchAll(jsxEvent)) add(`jsx.${match[1]}`, match[2], "ui_event", match.index);
   /*
@@ -1319,15 +1969,37 @@ function extractSql(text, clean, rel, methods) {
   const relations = [];
   const mapper = /<(select|insert|update|delete)\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/\1>/gi;
   const namespace = text.match(/<mapper\b[^>]*namespace\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+  /*
+   * iBatis 2 `<sqlMap namespace="Order">`. Java는 보통 `queryForList("Order.list")`로 부르므로
+   * id에 namespace를 붙이고 `statement_id`에 짧은 id를 남긴다 — useStatementNamespaces=false로
+   * `"list"`만 쓰는 프로젝트는 aggregate가 짧은 id로 되짚는다.
+   */
+  const sqlMapNamespace = namespace ? "" : text.match(/<sqlMap\b[^>]*namespace\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+  const statementId = (raw) => (namespace ? `${namespace}.${raw}` : sqlMapNamespace ? `${sqlMapNamespace}.${raw}` : raw);
+  const shortId = (raw) => (sqlMapNamespace ? { statement_id: raw } : {});
+  const callableTarget = (body) => body.replace(/<!\[CDATA\[/g, "").match(PROCEDURE_CALL_TEXT)?.[1]?.replace(/"/g, "").replace(/\s+/g, "").toUpperCase();
+  /* 프로시저 호출 문장은 SQL이 아니라 호출 관계다 — sql_usage가 아니라 call_graph 엣지가 된다(aggregate). */
+  const callables = [];
+  for (const match of text.matchAll(/<procedure\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/procedure>/gi)) {
+    const procedure = callableTarget(match[2]);
+    if (procedure) callables.push({ id: statementId(match[1]), ...shortId(match[1]), procedure, file: rel, line: atLine(match.index) });
+  }
   for (const match of text.matchAll(mapper)) {
     /*
      * HTML/JSP/ASP의 <select id="cmbLanguages"> 드롭다운도 이 정규식에 걸린다.
      * 레거시 화면이 많은 프로젝트에서 실제로 수백 건이 SQL로 잘못 등록됐다 —
      * MyBatis 매퍼 파일이 아니면 본문이 SQL 모양일 때만 인정한다.
      */
+    /* statementType="CALLABLE"의 `{call PKG.PROC(...)}` — 이 SQL id를 쓰는 메서드가 프로시저를 부른다(aggregate가 잇는다). */
+    const callable = callableTarget(match[3]);
+    if (sqlMapNamespace && callable) {
+      callables.push({ id: statementId(match[2]), ...shortId(match[2]), procedure: callable, file: rel, line: atLine(match.index) });
+      continue;
+    }
     if (!namespace && !sqlStatementType(match[3])) continue;
-    const id = namespace ? `${namespace}.${match[2]}` : match[2];
-    sqls.push({ id, file: rel, line: atLine(match.index), type: match[1].toLowerCase(), tables: [...new Set(sqlTables(match[3]))], text_preview: match[3].replace(/\s+/g, " ").trim().slice(0, 240), origin: "deterministic-indexer", confidence: "HIGH" });
+    const id = statementId(match[2]);
+    const mapperColumns = match[1].toLowerCase() === "select" ? selectColumns(match[3]) : [];
+    sqls.push({ id, ...shortId(match[2]), file: rel, line: atLine(match.index), type: match[1].toLowerCase(), tables: [...new Set(sqlTables(match[3]))], text_preview: match[3].replace(/\s+/g, " ").trim().slice(0, 240), ...(mapperColumns.length ? { columns: mapperColumns } : {}), ...(callable ? { procedure: callable } : {}), origin: "deterministic-indexer", confidence: "HIGH" });
     relations.push(...extractSqlRelations(match[3], { sql_id: id, file: rel, line: atLine(match.index) }));
     if (namespace) usages.push({ sql_id: id, file: rel, line: atLine(match.index), method: id, evidence: "MyBatis mapper namespace + statement id", origin: "deterministic-indexer", confidence: "HIGH" });
   }
@@ -1343,10 +2015,19 @@ function extractSql(text, clean, rel, methods) {
     const rawValue = block[2].match(/<value>([\s\S]*?)<\/value>/i)?.[1];
     if (!id || !rawValue) continue;
     const statement = rawValue.replace(/<!\[CDATA\[/g, "").replace(/\]\]>/g, "").trim();
-    const type = sqlStatementType(statement);
+    /*
+     * 저장 프로시저 호출 `{CALL PR_X(?, ?)}`. 문장 모양 검사에 안 걸려 통째로 빠졌다 — 실측(eduLms)
+     * CALL 70건이 전부 누락돼 수강신청 등록(PR_LS_APPLY_FRONT_PROC)이 sql·call_graph 어디에도 없었다.
+     * MyBatis 매퍼처럼 sql_usage 에 procedure 를 달아 남기면, 이 id 를 쓰는 메서드 → 프로시저 엣지는
+     * aggregate 가 이어 준다.
+     */
+    const procedure = callableTarget(statement);
+    const type = sqlStatementType(statement) || (procedure ? "call" : null);
     if (!type) continue;
     const line = atLine(block.index);
-    sqls.push({ id, file: rel, line, type, tables: [...new Set(sqlTables(statement))], text_preview: statement.replace(/\s+/g, " ").trim().slice(0, 240), origin: "deterministic-indexer", confidence: "HIGH" });
+    /* 결과를 위치로 읽는 화면(rtInfo[1][2])이 몇 번째 컬럼을 읽는지 풀려면 SELECT 순서가 있어야 한다. */
+    const containerColumns = type === "select" ? selectColumns(statement) : [];
+    sqls.push({ id, file: rel, line, type, tables: [...new Set(sqlTables(statement))], text_preview: statement.replace(/\s+/g, " ").trim().slice(0, 240), ...(containerColumns.length ? { columns: containerColumns } : {}), ...(procedure ? { procedure } : {}), origin: "deterministic-indexer", confidence: "HIGH" });
     relations.push(...extractSqlRelations(statement, { sql_id: id, file: rel, line }));
   }
   const annotation = /@(Query|Select|Insert|Update|Delete)\s*\(\s*(["'])([\s\S]*?)\2\s*\)/gi;
@@ -1360,7 +2041,11 @@ function extractSql(text, clean, rel, methods) {
     const decorated = nextMethod(methods, atLine(match.index));
     if (decorated) usages.push({ sql_id: id, file: rel, line: atLine(match.index), method: decorated.id, evidence: "SQL 애노테이션이 데코레이트한 메서드", origin: "deterministic-indexer", confidence: "MEDIUM" });
   }
+  const procedureCalls = [];
   for (const lit of extractStringLiterals(clean)) {
+    const callable = lit.content.match(PROCEDURE_CALL_TEXT)?.[1];
+    const caller = callable && enclosingMethod(methods, lit.start);
+    if (caller) procedureCalls.push({ caller: caller.id, ...procedureTarget(callable), file: rel, line: atLine(lit.start) });
     if (lit.content.length < 8 || lit.content.length > 1000) continue;
     const normalized = lit.content.replace(/\\(?:r|n|t)/g, " ").replace(/\s+/g, " ").trim();
     const type = normalized.match(/^select\s+[\s\S]+?\s+from\s+[\w$`"[\].]+(?:\s|$)/i) ? "select"
@@ -1379,12 +2064,18 @@ function extractSql(text, clean, rel, methods) {
     if (owner) usages.push({ sql_id: id, file: rel, line: atLine(lit.start), method: owner.id, evidence: "메서드 본문 내 인라인 SQL 리터럴", origin: "deterministic-indexer", confidence: "MEDIUM" });
   }
   const usage = /\b(?:selectOne|selectList|insert|update|delete|queryForObject|queryForList)\s*\(\s*["']([^"']+)["']/g;
-  for (const match of text.matchAll(usage)) usages.push({ sql_id: match[1], file: rel, line: atLine(match.index), method: nextMethod(methods, atLine(match.index))?.id || "unknown", origin: "deterministic-indexer", confidence: "HIGH" });
+  /*
+   * `sqlSession.selectList("id")`·쿼리 ID 상수는 메서드 본문 안에 있다 — 감싸는 메서드가 실행 주체다.
+   * nextMethod("이 줄 이후 첫 메서드")만 쓰면 여러 줄짜리 메서드에서 사용처가 **다음 메서드**로 잡혀
+   * data_flow·영향도가 엉뚱한 메서드를 가리켰다. 본문 밖(필드 초기화 등)일 때만 예전처럼 다음 메서드로 둔다.
+   */
+  const executingMethod = (offset) => enclosingMethod(methods, offset) || nextMethod(methods, atLine(offset));
+  for (const match of text.matchAll(usage)) usages.push({ sql_id: match[1], file: rel, line: atLine(match.index), method: executingMethod(match.index)?.id || "unknown", origin: "deterministic-indexer", confidence: "HIGH" });
   for (const match of text.matchAll(SQL_ID_LITERAL_RE)) {
     const line = atLine(match.index);
-    usages.push({ sql_id: match[1], file: rel, line, method: nextMethod(methods, line)?.id || "unknown", evidence: "쿼리 ID 상수 참조", candidate: true, origin: "deterministic-indexer", confidence: "HIGH" });
+    usages.push({ sql_id: match[1], file: rel, line, method: executingMethod(match.index)?.id || "unknown", evidence: "쿼리 ID 상수 참조", candidate: true, origin: "deterministic-indexer", confidence: "HIGH" });
   }
-  return { sqls, usages, relations };
+  return { sqls, usages, relations, procedureCalls, callables };
 }
 
 function extractTransactions(text, clean, rel, workspace, methods) {
@@ -1406,6 +2097,147 @@ function extractTransactions(text, clean, rel, workspace, methods) {
   return boundaries;
 }
 
+/*
+ * Spring XML 선언형 트랜잭션 — `<tx:advice>` + `<aop:config>`의 `<aop:advisor>`.
+ *
+ * 전자정부프레임워크 표준 구성은 코드에 `@Transactional`이 하나도 없고 `context-transaction.xml`의
+ * pointcut(`execution(* egovframework.example.sample..impl.*Impl.*(..))`)으로 서비스 구현 전체에
+ * 트랜잭션을 건다. 인덱서는 애너테이션만 찾아 transactions 인덱스가 아예 생기지 않았고, `/flow`는
+ * Grep 으로 XML 을 뒤져 채웠다(2026-09-28 egovframe-web-sample 실측). 여기서는 파일마다 규칙만 모으고,
+ * 메서드와의 대조는 모든 메서드를 아는 aggregate 에서 한다(`springTransactionBoundaries`).
+ */
+function extractSpringTransactionConfig(text, rel) {
+  if (extname(rel).toLowerCase() !== ".xml" || !/<\w+:advice\b|<\w+:advisor\b/.test(text)) return null;
+  const source = text.replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " "));
+  const atLine = lineIndex(text);
+  const decode = (value = "") => value.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'");
+  const advices = [];
+  for (const match of source.matchAll(/<tx:advice\b([^>]*?)(?:\/>|>([\s\S]*?)<\/tx:advice>)/g)) {
+    const id = attrValue(match[1], "id");
+    if (!id) continue;
+    const methods = [...(match[2] || "").matchAll(/<tx:method\b([^>]*?)\/?>/g)].map((item) => ({
+      name: attrValue(item[1], "name") || "",
+      propagation: attrValue(item[1], "propagation"),
+      isolation: attrValue(item[1], "isolation"),
+      read_only: attrValue(item[1], "read-only") === "true",
+      rollback_for: (attrValue(item[1], "rollback-for") || "").split(",").map((v) => v.trim()).filter(Boolean),
+    })).filter((item) => item.name);
+    advices.push({ id, methods, file: rel, line: atLine(match.index) });
+  }
+  const pointcuts = [...source.matchAll(/<aop:pointcut\b([^>]*?)\/?>/g)]
+    .map((match) => ({ id: attrValue(match[1], "id"), expression: decode(attrValue(match[1], "expression")), file: rel, line: atLine(match.index) }))
+    .filter((item) => item.id && item.expression);
+  const advisors = [...source.matchAll(/<aop:advisor\b([^>]*?)\/?>/g)].map((match) => ({
+    advice_ref: attrValue(match[1], "advice-ref"),
+    pointcut_ref: attrValue(match[1], "pointcut-ref"),
+    expression: decode(attrValue(match[1], "pointcut")),
+    file: rel, line: atLine(match.index),
+  })).filter((item) => item.advice_ref);
+  return advices.length || pointcuts.length || advisors.length ? { advices, pointcuts, advisors } : null;
+}
+
+/* AspectJ 타입 패턴(`com.acme..impl.*Impl`) → 정규식. `..`은 0개 이상의 중간 패키지, `*`는 이름 조각이다. */
+function aspectTypePattern(pattern) {
+  const body = pattern.split(/(\.\.|\.|\*)/).filter(Boolean)
+    .map((token) => (token === ".." ? String.raw`\.(?:[\w$]+\.)*` : token === "." ? String.raw`\.` : token === "*" ? String.raw`[\w$]*` : token.replace(/[.+?^${}()|[\]\\]/g, "\\$&")))
+    .join("");
+  return new RegExp(`^${body}$`);
+}
+
+/*
+ * pointcut 표현식을 메서드 판정 함수로 만든다. 지원하는 것은 `execution(...)`·`within(...)`과 그 `&&`·`||`·`!`
+ * (`and`·`or`·`not`) 조합뿐이다. `bean()`·`@annotation()` 같은 다른 지시자가 들어간 항은 정적으로 판정할 수
+ * 없으니 그 항을 통째로 버린다 — 틀리게 잇느니 잇지 않는 편이 낫다. 파라미터 패턴은 보지 않는다.
+ */
+function aspectPointcutMatcher(expression) {
+  const matchers = [];
+  for (const disjunct of expression.split(/\|\||\s+or\s+/)) {
+    const terms = [];
+    let supported = true;
+    for (const raw of disjunct.split(/&&|\s+and\s+/)) {
+      const negated = /^\s*(?:!|not\s+)/.test(raw);
+      const term = raw.replace(/^\s*(?:!|not\s+)/, "").trim().replace(/^\((.*)\)$/, "$1").trim();
+      let test = null;
+      const execution = term.match(/^execution\(\s*(.*)\)$/);
+      const within = term.match(/^within\(\s*([\w.*$]+)\s*\)$/);
+      if (execution) {
+        const parsed = execution[1].match(/([\w.*$]+)\s*\([^()]*\)\s*(?:throws\s+.*)?$/);
+        if (parsed) {
+          const cut = parsed[1].lastIndexOf(".");
+          /* `com.acme..*(..)`처럼 `..` 바로 뒤가 메서드 이름이면 타입은 `com.acme..*`(하위 패키지의 모든 타입)다. */
+          const typeText = cut > 0 ? (parsed[1][cut - 1] === "." ? `${parsed[1].slice(0, cut + 1)}*` : parsed[1].slice(0, cut)) : null;
+          const type = typeText ? aspectTypePattern(typeText) : null;
+          const name = aspectTypePattern(cut > 0 ? parsed[1].slice(cut + 1) : parsed[1]);
+          test = (method) => (!type || type.test(method.owner)) && name.test(method.name);
+        }
+      } else if (within) {
+        const type = aspectTypePattern(within[1]);
+        test = (method) => type.test(method.owner);
+      }
+      if (!test) { supported = false; break; }
+      terms.push(negated ? (method) => !test(method) : test);
+    }
+    if (supported && terms.length) matchers.push((method) => terms.every((test) => test(method)));
+  }
+  return matchers.length ? (method) => matchers.some((test) => test(method)) : null;
+}
+
+/* `<tx:method name>` — 정확히 같은 이름이 먼저, 없으면 걸리는 와일드카드 중 가장 긴 것(Spring NameMatchTransactionAttributeSource 규칙). */
+function txMethodAttribute(methods, name) {
+  const exact = methods.find((item) => item.name === name);
+  if (exact) return exact;
+  let best = null;
+  for (const item of methods) {
+    const pattern = new RegExp(`^${item.name.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+    if (pattern.test(name) && (!best || item.name.length > best.name.length)) best = item;
+  }
+  return best;
+}
+
+function springTransactionBoundaries(configs, methodNodes, config) {
+  const advices = new Map(configs.flatMap((item) => item.advices).map((item) => [item.id, item]));
+  const pointcuts = new Map(configs.flatMap((item) => item.pointcuts).map((item) => [item.id, item]));
+  const candidates = methodNodes
+    .filter((node) => node.type === "method" && !node.abstract && node.visibility === "public" && /\.(?:java|kt|groovy)$/i.test(node.file || ""))
+    .map((node) => {
+      const parts = node.id.split(".");
+      return { node, name: parts.at(-1), owner: parts.slice(0, -1).join(".") };
+    });
+  const boundaries = [];
+  for (const advisor of configs.flatMap((item) => item.advisors)) {
+    const advice = advices.get(advisor.advice_ref);
+    const pointcut = advisor.pointcut_ref ? pointcuts.get(advisor.pointcut_ref) : null;
+    const expression = advisor.expression || pointcut?.expression;
+    const matches = advice && expression ? aspectPointcutMatcher(expression) : null;
+    if (!matches) continue;
+    for (const method of candidates) {
+      if (!matches(method)) continue;
+      const attribute = txMethodAttribute(advice.methods, method.name);
+      if (!attribute) continue;
+      boundaries.push({
+        id: `${method.node.id}@${method.node.line}`, entry_method: method.node.id, file: method.node.file, line: method.node.line,
+        marker: "aop:advisor", propagation: attribute.propagation || "REQUIRED",
+        ...(attribute.isolation ? { isolation: attribute.isolation } : {}),
+        ...(attribute.read_only ? { read_only: true } : {}),
+        ...(attribute.rollback_for.length ? { rollback_for: attribute.rollback_for } : {}),
+        pointcut: expression, config_file: advisor.file, config_line: advisor.line, advice_file: advice.file, advice_line: advice.line,
+        methods_in_scope: [method.node.id], external_io_calls: [],
+        workspace: method.node.workspace || workspaceFor(method.node.file, config).id, origin: "deterministic-indexer", confidence: "MEDIUM",
+      });
+    }
+  }
+  return boundaries;
+}
+
+const IO_CLIENT_TYPES = new Map([
+  ["RestTemplate", "http"], ["WebClient", "http"], ["HttpClient", "http"],
+  ["KafkaTemplate", "kafka_producer"], ["KafkaProducer", "kafka_producer"],
+  ["RedisTemplate", "redis"], ["StringRedisTemplate", "redis"],
+  ["JavaMailSender", "mail"],
+]);
+/* `RestTemplate rest;`·`KafkaTemplate<String, Map<String, Object>> kafka =`·생성자 파라미터 `(HttpClient http,` */
+const IO_CLIENT_DECLARATION = new RegExp(String.raw`\b(${[...IO_CLIENT_TYPES.keys()].join("|")})(?:<[^;=(){}]*>)?\s+([A-Za-z_$][\w$]*)\s*[;=),]`, "g");
+
 function extractExternalIo(text, clean, rel, workspace, methods) {
   const atLine = lineIndex(text);
   const communications = [];
@@ -1418,9 +2250,35 @@ function extractExternalIo(text, clean, rel, workspace, methods) {
     ["redis", /\b(RedisTemplate|StringRedisTemplate|ioredis|redis\.createClient)\b/g],
     ["mail", /\b(JavaMailSender|smtplib|nodemailer)\b/g],
   ];
+  /*
+   * 주입·필드로 받은 클라이언트의 호출. `private final RestTemplate restTemplate;` 뒤의
+   * `restTemplate.postForObject("http://erp/api", ...)`는 호출 줄에 타입 이름이 없어 위 패턴이 못 잡고,
+   * 대신 필드 선언 줄이 통신으로 남아 엉뚱한 메서드에 붙었다. 선언에서 변수 → 통신 종류를 모으고
+   * 메서드 본문 안의 `변수.메서드(` 호출을 기록한다. 첫 인자가 문자열이면 그것(URL·토픽)이 대상이다.
+   */
+  const clientTypeOf = new Map();
+  for (const match of clean.matchAll(IO_CLIENT_DECLARATION)) clientTypeOf.set(match[2], match[1]);
+  const callTypes = new Set();
+  if (clientTypeOf.size) {
+    const names = [...clientTypeOf.keys()].map((name) => name.replace(/\$/g, "\\$")).join("|");
+    for (const match of clean.matchAll(new RegExp(String.raw`\b(${names})\s*\.\s*(\w+)\s*\(`, "g"))) {
+      const owner = enclosingMethod(methods, match.index);
+      if (!owner) continue;
+      const clientType = clientTypeOf.get(match[1]);
+      const type = IO_CLIENT_TYPES.get(clientType);
+      const literal = clean.slice(match.index + match[0].length, match.index + match[0].length + 300).match(/^\s*(["'`])([^"'`\n]{1,200})\1/)?.[2];
+      callTypes.add(type);
+      communications.push({ id: `${rel}:${atLine(match.index)}:${type}`, type, file: rel, line: atLine(match.index), method: owner.id, target: literal || clientType, workspace: workspace.id, origin: "deterministic-indexer", confidence: "MEDIUM" });
+    }
+  }
   for (const [type, regex] of patterns) {
     for (const match of clean.matchAll(regex)) {
-      communications.push({ id: `${rel}:${atLine(match.index)}:${type}`, type, file: rel, line: atLine(match.index), method: nextMethod(methods, atLine(match.index))?.id || "", target: quotedValue(match[1]) || match[1] || "unknown", workspace: workspace.id, origin: "deterministic-indexer", confidence: "MEDIUM" });
+      /* 본문 안 호출(RestTemplate 등)은 감싸는 메서드, 메서드 위 애너테이션(@KafkaListener)은 다음 메서드다. */
+      const enclosing = enclosingMethod(methods, match.index);
+      /* 호출을 이미 잡았으면 본문 밖 타입 이름(import·필드 선언)은 통신이 아니다. 못 잡았으면 탐지를 잃지 않게 남긴다. */
+      if (!enclosing && callTypes.has(type)) continue;
+      const owner = enclosing || nextMethod(methods, atLine(match.index));
+      communications.push({ id: `${rel}:${atLine(match.index)}:${type}`, type, file: rel, line: atLine(match.index), method: owner?.id || "", target: quotedValue(match[1]) || match[1] || "unknown", workspace: workspace.id, origin: "deterministic-indexer", confidence: "MEDIUM" });
     }
   }
   return communications;
@@ -1533,7 +2391,7 @@ const ENCODING_ALIASES = new Map([
   ["cp950", "big5"], ["ms950", "big5"],
   ["cp1252", "windows-1252"], ["ansi", "windows-1252"],
 ]);
-/* 선언도 없고 UTF-8도 아닌 파일의 마지막 수단. 이 하네스의 대상이 한국 ITO/SI 레거시라 EUC-KR을 쓴다. */
+/* 선언도 없고 UTF-8도 아닌 파일의 마지막 수단. 이 하네스의 대상이 한국 ITO/SI/SM 레거시라 EUC-KR을 쓴다. */
 const LEGACY_FALLBACK_ENCODING = "euc-kr";
 const CHARSET_DECLARATION = /\b(?:encoding|pageEncoding|charset)\s*=\s*["']?([\w][\w.:-]*)/i;
 
@@ -1632,7 +2490,7 @@ function xmlAttrs(source) {
  * analyzer.md Step 5가 수작업 grep으로 6~10쌍만 샘플링하던 것을 전수·결정론적으로 대체한다.
  */
 const SCRIPT_SRC_REGEX = /<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi;
-const TEMPLATE_EXTENSIONS = new Set([".jsp", ".jspx", ".tag", ".html", ".htm"]);
+const TEMPLATE_EXTENSIONS = new Set([".jsp", ".jspx", ".jspf", ".tag", ".html", ".htm"]);
 function extractClientRefs(text, rel) {
   if (!TEMPLATE_EXTENSIONS.has(extname(rel).toLowerCase())) return [];
   return [...text.matchAll(SCRIPT_SRC_REGEX)].map((match) => match[1]);
@@ -1652,21 +2510,447 @@ function detectLibraryVersions(scriptRefs) {
 /*
  * Spring XML 빈 정의(id→class) — Struts action의 `command` 속성(빈 id)이 가리키는 실제 서비스
  * 클래스를 찾는 데 쓰인다. `<bean id="X" class="Y"/>`, 속성 순서는 무관하게 잡는다.
+ *
+ * `name="a,b"`만 쓴 정의도 빈이다(전자정부 `context-idgen.xml`의 `<bean name="egovIdGnrService">`).
+ * 바로 아래 `<property>`의 value·ref 도 함께 남긴다 — 프레임워크 jar 의 클래스는 소스가 없어서, ID 를
+ * 어느 테이블에서 몇 자리로 채번하는지 같은 동작은 이 설정에만 적혀 있다. 중첩 빈의 속성은 바깥 빈 것이 아니다.
  */
-const SPRING_BEAN_REGEX = /<bean\b([^>]*)>/gi;
+const SPRING_BEAN_TAG = /<bean\b([^>]*?)(\/?)>|<\/bean\s*>|<property\b([^>]*?)\/>|<property\b([^>]*?)>([\s\S]*?)<\/property\s*>/gi;
 function extractSpringBeans(text, rel) {
-  if (extname(rel).toLowerCase() !== ".xml") return [];
+  if (extname(rel).toLowerCase() !== ".xml" || !/<bean\b/i.test(text)) return [];
+  const source = text.replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " "));
   const atLine = lineIndex(text);
   const beans = [];
-  for (const match of text.matchAll(SPRING_BEAN_REGEX)) {
+  const open = [];
+  for (const match of source.matchAll(SPRING_BEAN_TAG)) {
+    if (match[0].startsWith("</")) { open.pop(); continue; }
+    if (/^<property/i.test(match[0])) {
+      const owner = open.at(-1);
+      const attrs = xmlAttrs(match[3] ?? match[4]);
+      if (!owner || !attrs.name) continue;
+      const inner = match[5] || "";
+      const value = attrs.value ?? inner.match(/^\s*<value>([\s\S]*?)<\/value>/i)?.[1]?.trim();
+      const ref = attrs.ref ?? inner.match(/^\s*<ref\b[^>]*\bbean\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (value !== undefined || ref) owner.properties.push({ name: attrs.name, ...(ref ? { ref } : { value }) });
+      continue;
+    }
     const attrs = xmlAttrs(match[1]);
-    if (attrs.id && attrs.class) beans.push({ id: attrs.id, className: attrs.class, file: rel, line: atLine(match.index) });
+    const names = [...new Set([attrs.id, ...(attrs.name || "").split(/[\s,;]+/)].filter(Boolean))];
+    const bean = names.length && attrs.class
+      ? { id: names[0], ...(names.length > 1 ? { aliases: names.slice(1) } : {}), className: attrs.class, file: rel, line: atLine(match.index), properties: [] }
+      : { properties: [] };
+    if (bean.id) beans.push(bean);
+    if (!match[2]) open.push(bean);
   }
   return beans;
 }
 
+/*
+ * 업무 용어 — 코드명(MA00001)·영문 식별자로 된 레거시를 업무명으로 찾게 한다.
+ *
+ * 인덱스는 코드 이름만 담아 "수강신청"으로 찾으면 SQL 미리보기 4건만 걸렸고, 모델은 "Apply 겠지"
+ * 하고 영문을 추측했다(실측, eduLms). 코드명 체계에서는 그 추측이 통하지 않는다. 업무명은 소스에
+ * 글자로 남아 있다 — eduLms 에서 "수강신청"이 든 JSP 112·Java 27·XML 9개.
+ *
+ * 다만 모아서 다 보여 주면 정확도가 떨어진다. 112개 중 대부분은 다른 기능의 컬럼 이름("수강신청일")
+ * 이나 줄 끝 주석이다. 화면 제목에 든 것은 9개였고 학습자 수강신청 화면 4개가 전부 그 안에 있었다.
+ * 그래서 **어디에 나왔는지**를 함께 남긴다 — 정의하는 자리(제목·머리말·클래스 설명)와 언급하는
+ * 자리(표 머리·라벨)를 나누고, 줄 끝 주석은 양만 많아 모으지 않는다. 순위는 query-index search 가 매긴다.
+ */
+const HANGUL = /[가-힣]/;
+const MARKUP_TERM_EXT = new Set([".jsp", ".jspf", ".html", ".htm", ".xhtml", ".vue", ".asp", ".aspx", ".ascx", ".master", ".cshtml", ".vbhtml", ".razor"]);
+const CODE_DOC_EXT = new Set([".java", ".kt", ".kts", ".cs", ".js", ".ts", ".jsx", ".tsx", ".groovy", ".scala", ".xjs"]);
+/* 속성값 하나를 꺼낸다 — Title="…" / text='…' */
+const attrValue = (tag, name) => tag.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"))?.slice(1).find((v) => v !== undefined);
+const TERMS_PER_FILE = 40;
+
+/** 태그·스크립틀릿·엔티티를 걷고 제목 조각으로 쪼갠다. "수강신청 | 교육시스템" → ["수강신청", "교육시스템"] */
+function termPieces(raw) {
+  const text = String(raw)
+    .replace(/<%[\s\S]*?%>/g, " ").replace(/\$\{[^}]*\}/g, " ").replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ").replace(/&[a-z]+;/gi, " ").replace(/\s+/g, " ").trim();
+  return text.split(/\s[|›>·-]\s|\s\|\s|\|/).map((part) => part.trim()).filter((part) => HANGUL.test(part) && part.length >= 2 && part.length <= 40);
+}
+
+/** 주석 블록에서 업무 설명 줄만 꺼낸다. `@param` 같은 태그 줄과 코드 조각은 버린다. */
+function docLines(block) {
+  return block.replace(/^\/\*+|\*+\/$/g, "").split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\*+\s?/, "").trim())
+    .filter((line) => line && !line.startsWith("@") && HANGUL.test(line))
+    // "프로그램명 : 수강신청 관리" 같은 머리말 표지를 걷는다.
+    .map((line) => line.replace(/^(?:프로그램\s*명|프로그램\s*ID|화면\s*명|화면\s*ID|업무\s*명|기능\s*명?|설\s*명|개\s*요|내\s*용|제\s*목|Program\s*(?:Name|ID)|Screen\s*(?:Name|ID)|Description|Title|Summary|Desc)\s*[:：]\s*/i, ""))
+    .filter((line) => line.length >= 2 && line.length <= 60 && HANGUL.test(line))
+    .slice(0, 3);
+}
+
+/**
+ * @param {string} text  인코딩을 판정한 원문(주석 포함)
+ * @param {string} rel
+ * @param {Array<{ id: string, line: number }>} methods
+ * @param {Array<{ id: string, line: number }>} [classes]
+ */
+export function extractTerms(text, rel, methods, classes = []) {
+  const ext = extname(rel).toLowerCase();
+  /* 메시지 파일은 한글을 유니코드 이스케이프로 적는 것이 표준이다(native2ascii) — 원문에 한글 글자가 없어도 푼 뒤에는 있다. */
+  if (!HANGUL.test(text) && !(ext === ".properties" && /\\u[0-9a-fA-F]{4}/.test(text))) return [];
+  const atLine = lineIndex(text);
+  /** @type {Array<{ term: string, kind: string, file: string, line: number, symbol?: string }>} */
+  const terms = [];
+  const push = (term, kind, offset, symbol) => terms.push({ term, kind, file: rel, line: atLine(offset), ...(symbol ? { symbol } : {}) });
+  const pushPieces = (raw, kind, offset, symbol) => { for (const t of termPieces(raw)) push(t, kind, offset, symbol); };
+  const markup = MARKUP_TERM_EXT.has(ext);
+  const firstDecl = [...classes].sort((a, b) => a.line - b.line)[0];
+  /*
+   * 문서 주석의 주인 — 주석이 끝난 줄 바로 아래(3줄 안)에서 시작하는 클래스·메서드.
+   * 주인이 없고 첫 선언보다 위면 파일 머리말이다. 화면 파일 안의 주석은 대개 스크립트 주석이라 머리말로 올리지 않는다.
+   */
+  const attachDoc = (lines, offset, endLine, { allowHeader = !markup } = {}) => {
+    if (!lines.length) return;
+    const owner = methods.find((item) => item.line > endLine - 1 && item.line <= endLine + 3);
+    const ownerClass = classes.find((item) => item.line > endLine - 1 && item.line <= endLine + 3);
+    const kind = ownerClass ? "class_doc" : owner ? "method_doc" : (allowHeader && (!firstDecl || endLine <= firstDecl.line)) ? "header" : null;
+    if (kind) for (const t of lines) push(t, kind, offset, (ownerClass || owner)?.id);
+  };
+  /* 화면 태그가 나오기 전(지시문 <%@ … %>·<!DOCTYPE> 은 예외)인가 — 파일 머리말 판정. 줄 수로 자르면 짧은 파일에서 틀린다. */
+  const beforeMarkup = (offset) => !/<(?![%!@])/.test(text.slice(0, offset));
+
+  if (markup) {
+    for (const m of text.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/gi)) pushPieces(m[1], "title", m.index);
+    for (const m of text.matchAll(/<h([1-3])\b[^>]*>([\s\S]*?)<\/h\1>/gi)) pushPieces(m[2], "heading", m.index);
+    /*
+     * 머리말은 맨 위의 첫 주석 블록 하나다 — JSP·ASP.NET <%-- --%>, HTML <!-- -->.
+     * 중간의 것은 대개 주석 처리한 화면 조각이다(실측: '<legend>로그인</legend>').
+     */
+    const head = text.match(/<%--([\s\S]*?)--%>|<!--([\s\S]*?)-->/);
+    if (head && beforeMarkup(head.index)) {
+      for (const t of docLines((head[1] ?? head[2] ?? "").replace(/<[^>]+>/g, " "))) push(t, "header", head.index);
+    }
+    // ASP 클래식 — 맨 위 <% … %> 안의 VBScript ' 주석 머리말
+    const aspHead = ext === ".asp" ? text.match(/<%(?!@)([\s\S]*?)%>/) : null;
+    if (aspHead && beforeMarkup(aspHead.index)) {
+      const lines = aspHead[1].split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("'")).map((l) => l.replace(/^'+\s*/, ""));
+      for (const t of docLines(lines.join("\n"))) push(t, "header", aspHead.index);
+    }
+    // ASP.NET WebForms — <%@ Page Title="수강신청" %>
+    for (const m of text.matchAll(/<%@\s*(?:Page|Control|Master)\b[^%]*%>/gi)) {
+      const title = attrValue(m[0], "Title");
+      if (title) pushPieces(title, "title", m.index);
+    }
+    // Razor — ViewData["Title"] = "…" / ViewBag.Title = "…" / <PageTitle>…</PageTitle>
+    for (const m of text.matchAll(/(?:ViewData\s*\[\s*"Title"\s*\]|ViewBag\.Title)\s*=\s*"([^"]*)"/g)) pushPieces(m[1], "title", m.index);
+    for (const m of text.matchAll(/<PageTitle>([\s\S]*?)<\/PageTitle>/g)) pushPieces(m[1], "title", m.index);
+    for (const m of text.matchAll(/<(th|label|legend|caption)\b[^>]*>([\s\S]*?)<\/\1>/gi)) pushPieces(m[2], "label", m.index);
+    // ASP.NET 서버 컨트롤 — <asp:Label Text="…"> / HeaderText="…", DevExpress <dx:ASPxLabel Text="…"> / <dx:GridViewDataTextColumn Caption="…">
+    for (const m of text.matchAll(/<(?:asp|dx):\w+\b[^>]*>/gi)) {
+      for (const name of ["Text", "HeaderText", "Caption", "ToolTip"]) {
+        const value = attrValue(m[0], name);
+        if (value) pushPieces(value, "label", m.index);
+      }
+    }
+  }
+
+  if (CODE_DOC_EXT.has(ext) || markup) {
+    for (const m of text.matchAll(/\/\*[\s\S]*?\*\//g)) {
+      attachDoc(docLines(m[0]), m.index, atLine(m.index + m[0].length));
+    }
+  }
+
+  if (ext === ".cs") {
+    /* C# XML 문서 주석 — 이어진 /// 줄. <summary> 안을 쓴다(없으면 태그를 걷은 전체). */
+    for (const m of text.matchAll(/(?:^[ \t]*\/\/\/.*(?:\r?\n|$))+/gm)) {
+      const body = m[0].split(/\r?\n/).map((l) => l.replace(/^\s*\/\/\/\s?/, "")).join("\n");
+      const summary = body.match(/<summary>([\s\S]*?)<\/summary>/i)?.[1] ?? body;
+      attachDoc(docLines(summary.replace(/<[^>]+>/g, " ")), m.index, atLine(m.index + m[0].trimEnd().length));
+    }
+    /* 파일 맨 위의 // 머리말(using·namespace 전) */
+    const top = text.match(/^(?:﻿)?((?:[ \t]*\/\/(?!\/).*\r?\n)+)/);
+    if (top) for (const t of docLines(top[1].replace(/^\s*\/\/\s?/gm, ""))) push(t, "header", 0);
+    /* [Display(Name = "…")] · [DisplayName("…")] · [Description("…")] */
+    for (const m of text.matchAll(/\[\s*(?:Display\s*\([^\]]*?\bName\s*=\s*|DisplayName\s*\(\s*|Description\s*\(\s*)"([^"]*)"/g)) pushPieces(m[1], "label", m.index);
+    /* WinForms 디자이너 — this.Text 는 창 제목, 컨트롤·열의 Text/HeaderText 는 라벨 */
+    if (/\.Designer\.cs$/i.test(rel)) {
+      for (const m of text.matchAll(/\bthis\.Text\s*=\s*"([^"]*)"/g)) pushPieces(m[1], "title", m.index);
+      for (const m of text.matchAll(/\bthis\.\w+\.(?:Text|HeaderText|Caption)\s*=\s*"([^"]*)"/g)) pushPieces(m[1], "label", m.index);
+    }
+  }
+
+  if (ext === ".vb") {
+    /*
+     * VB.NET — ''' 문서 주석, 디자이너 Me.Text(창 제목)·Me.컨트롤.Text(라벨). VB 는 인덱서가 클래스·메서드를
+     * 뽑지 않아 주석의 주인을 모른다. 맨 위 블록만 머리말로, 나머지는 메서드 설명(중간 가중치)으로 둔다.
+     */
+    let first = true;
+    for (const m of text.matchAll(/(?:^[ \t]*'''.*(?:\r?\n|$))+/gm)) {
+      const body = m[0].split(/\r?\n/).map((l) => l.replace(/^\s*'''\s?/, "")).join("\n");
+      const summary = body.match(/<summary>([\s\S]*?)<\/summary>/i)?.[1] ?? body;
+      for (const t of docLines(summary.replace(/<[^>]+>/g, " "))) push(t, first ? "header" : "method_doc", m.index);
+      first = false;
+    }
+    if (/\.Designer\.vb$/i.test(rel)) {
+      for (const m of text.matchAll(/\bMe\.Text\s*=\s*"([^"]*)"/g)) pushPieces(m[1], "title", m.index);
+      for (const m of text.matchAll(/\bMe\.\w+\.(?:Text|HeaderText|Caption)\s*=\s*"([^"]*)"/g)) pushPieces(m[1], "label", m.index);
+    }
+  }
+
+  if (ext === ".resx") {
+    /* 리소스 문자열. 폼의 $this.Text 는 창 제목이다. */
+    for (const m of text.matchAll(/<data\s+name\s*=\s*"([^"]+)"[^>]*>\s*<value>([\s\S]*?)<\/value>/gi)) {
+      pushPieces(m[2], /^\$this\.Text$/i.test(m[1]) ? "title" : "label", m.index, m[1]);
+    }
+  }
+
+  if (ext === ".py") {
+    /* 모듈 문서 문자열(파일 첫 문장) → 머리말. 그 위의 # 주석(#!·인코딩 선언 제외)도 머리말. */
+    const moduleDoc = text.match(/^(?:﻿)?(?:[ \t]*(?:#.*)?\r?\n)*[ \t]*[rRuU]?("""|''')([\s\S]*?)\1/);
+    if (moduleDoc) for (const t of docLines(moduleDoc[2])) push(t, "header", moduleDoc.index);
+    const hashTop = text.match(/^(?:﻿)?((?:[ \t]*#.*\r?\n)+)/);
+    if (hashTop) {
+      const lines = hashTop[1].split(/\r?\n/).filter((l) => !/^\s*#!|coding[:=]/.test(l)).map((l) => l.replace(/^\s*#+\s?/, "")).join("\n");
+      for (const t of docLines(lines)) push(t, "header", 0);
+    }
+    /* class·def 바로 아래의 문서 문자열 — 주인은 그 줄의 선언이다. */
+    for (const m of text.matchAll(/^[ \t]*(?:async[ \t]+)?(class|def)[ \t]+(\w+)[^\n]*:[ \t]*\r?\n[ \t]*[rRuU]?("""|''')([\s\S]*?)\3/gm)) {
+      const declLine = atLine(m.index + m[0].indexOf(m[1]));
+      const pool = m[1] === "class" ? classes : methods;
+      const owner = pool.find((item) => item.line === declLine) || pool.find((item) => Math.abs(item.line - declLine) <= 1);
+      for (const t of docLines(m[4])) push(t, m[1] === "class" ? "class_doc" : "method_doc", m.index, owner?.id);
+    }
+    /* Django verbose_name · FastAPI/Flask summary·description */
+    for (const m of text.matchAll(/\bverbose_name(?:_plural)?\s*=\s*_?\(?\s*[rRuU]?["']([^"']+)["']/g)) pushPieces(m[1], "label", m.index);
+    for (const m of text.matchAll(/\b(summary|description)\s*=\s*[rRuU]?["']([^"']+)["']/g)) pushPieces(m[2], "desc", m.index);
+  }
+
+  if (ext === ".java" || ext === ".kt") {
+    /* Swagger·SpringDoc — @Tag(name/description) 는 클래스, @Operation(summary)·@ApiOperation(value) 는 메서드 설명 */
+    for (const m of text.matchAll(/@(Tag|Api|Operation|ApiOperation)\s*\(([^)]*)\)/g)) {
+      const args = m[2];
+      const value = attrValue(args, m[1] === "Operation" ? "summary" : m[1] === "ApiOperation" ? "value" : m[1] === "Api" ? "tags" : "name")
+        ?? args.match(/^\s*"([^"]*)"/)?.[1];
+      if (!value) continue;
+      const line = atLine(m.index);
+      const owner = (m[1] === "Tag" || m[1] === "Api" ? classes : methods).find((item) => item.line >= line && item.line <= line + 4);
+      pushPieces(value, "desc", m.index, owner?.id);
+    }
+  }
+
+  if (ext === ".xfdl" || (ext === ".xml" && /<Form\b[^>]*\btitletext\s*=/i.test(text))) {
+    /* Nexacro·XPlatform 화면 — <Form titletext="…"> 는 화면 제목, Static·Button·Grid 머리의 text 는 라벨 */
+    for (const m of text.matchAll(/<Form\b[^>]*>/gi)) {
+      const title = attrValue(m[0], "titletext");
+      if (title) pushPieces(title, "title", m.index);
+    }
+    for (const m of text.matchAll(/<(Static|Button|CheckBox|Radio|GroupBox|Cell)\b[^>]*>/gi)) {
+      const value = attrValue(m[0], "text");
+      if (value) pushPieces(value, "label", m.index);
+    }
+  }
+
+  if (ext === ".xml") {
+    // 자체 쿼리 컨테이너의 설명 — <query><id>X</id>…<description>수강신청 등록</description></query>
+    for (const m of text.matchAll(/<(query|statement|sql)\b[^>]*>([\s\S]*?)<\/\1>/gi)) {
+      const id = m[2].match(/<id>\s*([^<]+?)\s*<\/id>/i)?.[1];
+      const desc = m[2].match(/<description>([\s\S]*?)<\/description>/i)?.[1];
+      if (desc) for (const t of termPieces(desc.replace(/<!\[CDATA\[|\]\]>/g, ""))) push(t, "desc", m.index, id);
+    }
+    // MyBatis·iBatis 문장 바로 위의 <!-- 설명 -->
+    for (const m of text.matchAll(/<!--([\s\S]*?)-->\s*<(select|insert|update|delete|procedure|statement)\b[^>]*\bid\s*=\s*["']([^"']+)["']/gi)) {
+      for (const t of termPieces(m[1])) push(t, "desc", m.index, m[3]);
+    }
+  }
+
+  if (ext === ".sql") {
+    for (const m of text.matchAll(/comment\s+on\s+(table|column)\s+([\w$."]+)\s+is\s+'((?:[^']|'')*)'/gi)) {
+      for (const t of termPieces(m[3].replace(/''/g, "'"))) push(t, m[1].toLowerCase() === "table" ? "desc" : "label", m.index, m[2].replace(/"/g, "").toUpperCase());
+    }
+  }
+
+  if (ext === ".properties" && /_ko|message|label|resource/i.test(rel)) {
+    for (const m of text.matchAll(/^[ \t]*([\w.\-]+)[ \t]*[=:][ \t]*(.+)$/gm)) {
+      const value = m[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+      for (const t of termPieces(value)) push(t, "label", m.index, m[1]);
+    }
+  }
+
+  const seen = new Set();
+  return terms.filter((item) => {
+    const key = `${item.kind}\u0000${item.term}\u0000${item.symbol || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, TERMS_PER_FILE);
+}
+
+/*
+ * 화면 그리드 열 ↔ DB 컬럼.
+ *
+ * 열 정의 한 줄에 화면 용어(머리)와 DB 컬럼(필드)이 같이 들어 있다 — IBSheet {Header:"신청일자",
+ * SaveName:"APPL_DT"}, DevExpress this.col1.FieldName/Caption, Nexacro 머리 Cell ↔ 본문 bind:.
+ * 이것이 없으면 "APPL_DT 를 바꾸면 어느 화면이 영향받나"를 SQL 까지만 따라가고 화면에서 멈춘다.
+ * 머리 글자는 업무 용어(label)로도 쓴다.
+ */
+const GRID_SCRIPT_EXT = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".vue", ".jsp", ".jspf", ".html", ".htm", ".asp", ".aspx", ".ascx", ".cshtml", ".xjs"]);
+const COLUMN_ID = /^[A-Za-z_][\w$]*$/;
+
+/** 필드 위치를 감싸는 가장 가까운 { … } — 문자열 안의 중괄호는 무시하지 않는다(근사). */
+function enclosingObject(text, index, reach = 600) {
+  let start = -1;
+  for (let i = index - 1, depth = 0; i >= Math.max(0, index - reach); i -= 1) {
+    const ch = text[i];
+    if (ch === "}") depth += 1;
+    else if (ch === "{") { if (depth === 0) { start = i; break; } depth -= 1; }
+  }
+  if (start < 0) return null;
+  for (let j = index, depth = 0; j < Math.min(text.length, index + reach); j += 1) {
+    const ch = text[j];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") { if (depth === 0) return text.slice(start, j + 1); depth -= 1; }
+  }
+  return null;
+}
+
+/**
+ * @param {string} text
+ * @param {string} rel
+ * @returns {Array<{ field: string, header?: string, lib: string, file: string, line: number }>}
+ */
+export function extractGridColumns(text, rel) {
+  const ext = extname(rel).toLowerCase();
+  const atLine = lineIndex(text);
+  /** @type {Array<{ field: string, header?: string, lib: string, file: string, line: number }>} */
+  const out = [];
+  const add = (field, header, lib, offset) => {
+    if (!field || !COLUMN_ID.test(field)) return;
+    out.push({ field, ...(header && header.trim() ? { header: header.trim() } : {}), lib, file: rel, line: atLine(offset) });
+  };
+
+  if (ext === ".cs" || ext === ".vb") {
+    /* 디자이너 코드는 속성을 컨트롤마다 따로 대입한다 — 같은 컨트롤 이름으로 필드와 머리를 짝짓는다. C# this. · VB Me. */
+    /** @type {Map<string, { field: string, at: number, lib: string }>} */
+    const fields = new Map();
+    /** @type {Map<string, string>} */
+    const captions = new Map();
+    for (const m of text.matchAll(/\b(?:this|Me)\.(\w+)\.FieldName\s*=\s*"([^"]+)"/g)) fields.set(m[1], { field: m[2], at: m.index, lib: "devexpress" });
+    for (const m of text.matchAll(/\b(?:this|Me)\.(\w+)\.DataPropertyName\s*=\s*"([^"]+)"/g)) fields.set(m[1], { field: m[2], at: m.index, lib: "winforms" });
+    for (const m of text.matchAll(/\b(?:this|Me)\.(\w+)\.(?:Caption|HeaderText)\s*=\s*"([^"]*)"/g)) captions.set(m[1], m[2]);
+    for (const [control, f] of fields) add(f.field, captions.get(control), f.lib, f.at);
+  }
+
+  if (MARKUP_TERM_EXT.has(ext)) {
+    /* <dx:GridViewDataTextColumn FieldName="" Caption=""> · <asp:BoundField DataField="" HeaderText=""> */
+    for (const m of text.matchAll(/<(dx|asp):\w+\b[^>]*>/gi)) {
+      const field = attrValue(m[0], "FieldName") ?? attrValue(m[0], "DataField");
+      if (field) add(field, attrValue(m[0], "Caption") ?? attrValue(m[0], "HeaderText"), m[1].toLowerCase() === "dx" ? "devexpress" : "aspnet", m.index);
+    }
+  }
+
+  if (GRID_SCRIPT_EXT.has(ext)) {
+    for (const m of text.matchAll(/\b(SaveName|Name|dataField|fieldName|ref)\s*:\s*["']([A-Za-z_][\w$]*)["']/g)) {
+      const object = enclosingObject(text, m.index);
+      if (!object) continue;
+      const header = object.match(/\b(?:Header|headerText)\s*:\s*["']([^"']+)["']/)?.[1]
+        ?? object.match(/\bheader\s*:\s*(?:\{[^}]*?\btext\s*:\s*)?["']([^"']+)["']/)?.[1]
+        ?? object.match(/\bcaption\s*:\s*\[?\s*["']([^"']+)["']/)?.[1];
+      // 머리가 없으면 그리드 열이 아니다 — name: 은 어디에나 있다.
+      if (!header) continue;
+      const lib = /\bHeader\s*:/.test(object) ? "ibsheet" : m[1] === "dataField" ? "auigrid" : m[1] === "ref" ? "sbgrid" : "realgrid";
+      add(m[2], header, lib, m.index);
+    }
+  }
+
+  if (ext === ".xfdl" || (ext === ".xml" && /<Format\b/i.test(text) && /<Band\b/i.test(text))) {
+    /* Nexacro·XPlatform Grid — 같은 Format 안에서 머리 Band 의 Cell 과 본문 Band 의 bind: Cell 을 col 번호로 짝짓는다. */
+    for (const format of text.matchAll(/<Format\b[\s\S]*?<\/Format>/gi)) {
+      /** @type {Map<string, string>} */
+      const heads = new Map();
+      for (const band of format[0].matchAll(/<Band\b([^>]*)>([\s\S]*?)<\/Band>/gi)) {
+        const id = attrValue(band[1], "id") ?? "";
+        for (const cell of band[2].matchAll(/<Cell\b[^>]*>/gi)) {
+          const col = attrValue(cell[0], "col") ?? "0";
+          const value = attrValue(cell[0], "text") ?? "";
+          if (/^head$/i.test(id)) heads.set(col, value);
+          else if (/^body$/i.test(id)) {
+            const bind = value.match(/^bind:(\w+)$/i)?.[1];
+            if (bind) add(bind, heads.get(col), "nexacro", format.index + band.index + cell.index);
+          }
+        }
+      }
+    }
+  }
+
+  const seen = new Set();
+  return out.filter((item) => {
+    const key = `${item.field}\u0000${item.header || ""}\u0000${item.line}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/*
+ * DevExpress XtraReports 보고서(.repx).
+ *
+ * 데이터 소스(SqlDataSource)는 대개 Base64 로 싼 XML 로 들어 있다 — <Item ObjectType="…SqlDataSource…"
+ * Base64="PFNxbERhdGFTb3VyY2…"/>. 풀면 <Query Type="CustomSqlQuery"><Sql>SELECT …</Sql></Query>,
+ * <Query Type="SelectQuery"><Tables><Table Name="TB_X"/>, <Query Type="StoredProcQuery"><ProcName>PR_X</ProcName>
+ * 가 나온다. 이게 없으면 보고서가 쓰는 테이블이 영향도에 안 잡힌다. 풀지 않은 채 들어 있는 판도 같이 본다.
+ */
+function unescapeXml(value) {
+  return String(value).replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&#xD;|&#xA;|&#13;|&#10;/gi, "\n").replace(/&amp;/g, "&");
+}
+
+export function extractRepx(text, rel) {
+  const atLine = lineIndex(text);
+  /** @type {string[]} 데이터 소스 XML 조각들(풀어 낸 것 + 원문) */
+  const payloads = [];
+  for (const m of text.matchAll(/\bBase64\s*=\s*"([A-Za-z0-9+/=\s]{16,})"/g)) {
+    try {
+      const decoded = Buffer.from(m[1].replace(/\s+/g, ""), "base64").toString("utf8");
+      if (/<(SqlDataSource|Query)\b/.test(decoded)) payloads.push(decoded);
+    } catch { /* Base64 가 아니면 넘어간다 */ }
+  }
+  payloads.push(unescapeXml(text));
+  const reportName = text.match(/<XtraReportsLayoutSerializer\b[^>]*\bName\s*=\s*"([^"]+)"/)?.[1] || basename(rel, extname(rel));
+  const sqls = [];
+  const relations = [];
+  let n = 0;
+  for (const payload of payloads) {
+    for (const q of payload.matchAll(/<Query\b([^>]*)>([\s\S]*?)<\/Query>/gi)) {
+      const type = attrValue(q[1], "Type") || "";
+      const name = attrValue(q[1], "Name") || `Query${n}`;
+      const id = `${reportName}.${name}`;
+      n += 1;
+      if (/CustomSqlQuery/i.test(type)) {
+        const statement = unescapeXml(q[2].match(/<Sql>([\s\S]*?)<\/Sql>/i)?.[1] || "").trim();
+        const kind = sqlStatementType(statement);
+        if (!kind) continue;
+        sqls.push({ id, file: rel, line: 1, type: kind, tables: [...new Set(sqlTables(statement))], text_preview: statement.replace(/\s+/g, " ").slice(0, 240), origin: "deterministic-indexer", confidence: "HIGH" });
+        relations.push(...extractSqlRelations(statement, { sql_id: id, file: rel, line: 1 }));
+      } else if (/SelectQuery/i.test(type)) {
+        const tables = [...q[2].matchAll(/<Table\b[^>]*\bName\s*=\s*"([^"]+)"/gi)].map((t) => t[1].replace(/^.*\./, "").toUpperCase());
+        if (tables.length) sqls.push({ id, file: rel, line: 1, type: "select", tables: [...new Set(tables)], text_preview: `(SelectQuery) ${[...new Set(tables)].join(", ")}`, origin: "deterministic-indexer", confidence: "MEDIUM" });
+      } else if (/StoredProcQuery/i.test(type)) {
+        const proc = q[2].match(/<ProcName>([^<]+)<\/ProcName>/i)?.[1]?.trim();
+        if (proc) sqls.push({ id, file: rel, line: 1, type: "call", tables: [], text_preview: `{CALL ${proc}}`, procedure: proc.replace(/"/g, "").toUpperCase(), origin: "deterministic-indexer", confidence: "HIGH" });
+      }
+    }
+  }
+  /* 보고서 이름은 제목, 컨트롤 글자는 라벨, [필드] 바인딩은 컬럼 연결 */
+  const terms = [];
+  const displayName = text.match(/<XtraReportsLayoutSerializer\b[^>]*\bDisplayName\s*=\s*"([^"]+)"/)?.[1];
+  if (displayName) for (const t of termPieces(unescapeXml(displayName))) terms.push({ term: t, kind: "title", file: rel, line: 1 });
+  for (const m of text.matchAll(/<Item\d+\b[^>]*\bControlType\s*=\s*"(?:XRLabel|XRTableCell|XRRichText)"[^>]*>/gi)) {
+    const value = attrValue(m[0], "Text");
+    if (value) for (const t of termPieces(unescapeXml(value))) terms.push({ term: t, kind: "label", file: rel, line: atLine(m.index) });
+  }
+  const gridColumns = [];
+  for (const m of text.matchAll(/\bExpression\s*=\s*"\[([A-Za-z_][\w$]*)\]"/g)) gridColumns.push({ field: m[1], lib: "xtrareports", file: rel, line: atLine(m.index) });
+  for (const m of text.matchAll(/\bDataMember\s*=\s*"[\w$]+\.([A-Za-z_][\w$]*)"/g)) gridColumns.push({ field: m[1], lib: "xtrareports", file: rel, line: atLine(m.index) });
+  return { sqls, relations, terms: terms.slice(0, TERMS_PER_FILE), gridColumns };
+}
+
 function analyzeFile(file, root, config) {
-  const decoded = decodeSource(readFileSync(file.full));
+  const buffer = readFileSync(file.full);
+  const decoded = decodeSource(buffer);
   const text = decoded.text;
   const ext = extname(file.rel).toLowerCase();
   const clean = stripComments(text, ext);
@@ -1674,8 +2958,16 @@ function analyzeFile(file, root, config) {
   const symbolFacts = extractSymbols(text, clean, file.rel, workspace);
   const nexacro = extractNexacro(text, file.rel, workspace);
   const api = extractApi(text, clean, file.rel, workspace, symbolFacts.methods, symbolFacts.classes);
+  const sql = extractSql(text, clean, file.rel, symbolFacts.methods);
+  const embedded = symbolFacts.sqlFacts || (isPlsqlSource(ext, clean) ? extractPlsqlSql(text, clean, file.rel, symbolFacts.methods)
+    : PROC_EXTENSIONS.has(ext) ? extractProcSql(text, clean, file.rel, symbolFacts.methods) : null);
+  if (embedded) { sql.sqls.push(...embedded.sqls); sql.usages.push(...embedded.usages); sql.relations.push(...embedded.relations); }
+  const repx = ext === ".repx" ? extractRepx(text, file.rel) : null;
+  if (repx) { sql.sqls.push(...repx.sqls); sql.relations.push(...repx.relations); }
   return {
     rel: file.rel,
+    /* 소스 지문이 같은 파일을 다시 열지 않도록 여기서 읽은 바이트의 해시를 넘긴다(Windows에서 open이 파일당 ~0.5ms). */
+    contentSha1: createHash("sha1").update(buffer).digest("hex"),
     encoding: { label: decoded.encoding, detected_by: decoded.detected_by },
     mtime: file.stats.mtime.toISOString(),
     size: file.stats.size,
@@ -1684,20 +2976,110 @@ function analyzeFile(file, root, config) {
     callSites: symbolFacts.callSites,
     injects: symbolFacts.injects,
     fields: symbolFacts.fields || [],
+    locals: symbolFacts.locals || [],
+    includes: symbolFacts.includes || [],
+    scripts: symbolFacts.scripts || [],
+    pathVars: symbolFacts.pathVars || [],
+    properties: symbolFacts.properties || [],
     adapters: detectAdapters(file.rel, text),
     bindings: [...extractBindings(text, clean, file.rel, workspace, symbolFacts.methods), ...nexacro.bindings],
     fastApi: extractFastApiMeta(text, clean, file.rel),
     endpoints: api.endpoints,
     consumers: [...api.consumers, ...nexacro.consumers],
     uiFlow: nexacro.uiFlow,
-    ...extractSql(text, clean, file.rel, symbolFacts.methods),
+    ...sql,
     boundaries: extractTransactions(text, clean, file.rel, workspace, symbolFacts.methods),
     communications: extractExternalIo(text, clean, file.rel, workspace, symbolFacts.methods),
     env: extractEnv(text, clean, file.rel, workspace),
     tables: ext === ".sql" ? extractSchema(text, file.rel) : [],
     clientRefs: extractClientRefs(text, file.rel),
     springBeans: extractSpringBeans(text, file.rel),
+    springTx: extractSpringTransactionConfig(text, file.rel),
+    ...gridAndTerms(text, file.rel, symbolFacts, repx),
+    messageRefs: extractMessageRefs(text, file.rel),
+    messageLabels: extractMessageLabels(text, file.rel),
+    /* 화면의 문자열 디스패치 호출과 그 콜백이 결과를 읽는 자리(index/dispatch.mjs). */
+    dispatchCalls: DISPATCH_CALL_EXT.has(ext) ? extractDispatchCalls(clean, file.rel, symbolFacts.methods) : [],
+    /* 서버 메서드가 쿼리 결과를 내보내는 이름(`dataSet.set("rtInfo", …)`). */
+    resultKeys: RESULT_KEY_EXT.has(ext) ? extractResultKeys(clean, symbolFacts.methods) : [],
   };
+}
+
+const DISPATCH_CALL_EXT = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".vue", ".jsp", ".jspf", ".jspx", ".html", ".htm", ".asp", ".aspx", ".xjs"]);
+const RESULT_KEY_EXT = new Set([".java", ".kt", ".kts", ".cs"]);
+
+/* 그리드 열과 업무 용어. 그리드 머리 글자도 라벨 용어가 된다(필드 이름을 주인으로). */
+/*
+ * 화면이 메시지 코드로 적은 글자 — `<spring:message code="button.create"/>` · `<fmt:message key="…"/>`.
+ *
+ * 전자정부 표준 화면은 한글을 JSP 에 쓰지 않고 메시지 파일에서 가져온다. 화면 파일에 한글이 없으니
+ * "등록"으로 찾으면 등록 화면이 나오지 않았다(egovframe-web-sample 실측). 여기서는 코드와 자리만 모으고,
+ * 코드 → 글자는 메시지 파일을 모두 읽은 aggregate 에서 푼다(`messageRefTerms`).
+ */
+function extractMessageRefs(text, rel) {
+  if (!MARKUP_TERM_EXT.has(extname(rel).toLowerCase()) || !/<(?:spring|fmt):message\b/i.test(text)) return [];
+  const atLine = lineIndex(text);
+  const titles = [...text.matchAll(/<(title|h[1-3])\b[^>]*>[\s\S]*?<\/\1>/gi)].map((m) => [m.index, m.index + m[0].length, m[1].toLowerCase() === "title" ? "title" : "heading"]);
+  const refs = [];
+  for (const m of text.matchAll(/<(?:spring:message\b[^>]*?\bcode|fmt:message\b[^>]*?\bkey)\s*=\s*["']([^"'$]+)["']/gi)) {
+    const kind = titles.find(([start, end]) => m.index >= start && m.index < end)?.[2] || "label";
+    refs.push({ code: m[1], kind, line: atLine(m.index) });
+  }
+  return refs;
+}
+
+/*
+ * 메시지 파일의 한글 라벨 전부(`코드 → 글자`). 용어집은 파일당 40개로 자르므로(TERMS_PER_FILE) 수백 줄짜리
+ * 메시지 파일에서 화면이 쓰는 코드를 대부분 놓친다 — 화면 참조를 풀 사전은 따로 전부 모은다.
+ */
+function extractMessageLabels(text, rel) {
+  if (extname(rel).toLowerCase() !== ".properties") return [];
+  const labels = [];
+  for (const m of text.matchAll(/^[ \t]*([\w.\-]+)[ \t]*[=:][ \t]*(.+)$/gm)) {
+    const value = m[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))).trim();
+    if (HANGUL.test(value)) labels.push([m[1], value]);
+  }
+  return labels;
+}
+
+/*
+ * 메시지 참조를 글자로 푼 용어. 같은 코드가 여러 메시지 파일에 있으면 `_ko` 가 먼저, 그다음 기본 파일이다
+ * (`_en` 같은 다른 언어 파일은 한글이 없어 애초에 라벨이 되지 않는다).
+ */
+function messageRefTerms(facts) {
+  const labels = new Map();
+  for (const fact of facts) {
+    const rank = /_ko(?:_KR)?\.properties$/i.test(fact.rel) ? 0 : 1;
+    for (const [code, value] of fact.messageLabels || []) {
+      const known = labels.get(code);
+      if (!known || rank < known.rank) labels.set(code, { rank, terms: termPieces(value) });
+    }
+  }
+  if (!labels.size) return [];
+  const entries = [];
+  const seen = new Set();
+  for (const fact of facts) {
+    for (const ref of fact.messageRefs || []) {
+      for (const term of labels.get(ref.code)?.terms || []) {
+        const key = `${fact.rel}\u0000${ref.kind}\u0000${term}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        entries.push({ term, kind: ref.kind, file: fact.rel, line: ref.line, symbol: ref.code });
+      }
+    }
+  }
+  return entries;
+}
+
+function gridAndTerms(text, rel, symbolFacts, repx) {
+  const gridColumns = [...extractGridColumns(text, rel), ...(repx?.gridColumns || [])];
+  const terms = [...(repx?.terms || [])];
+  terms.push(...extractTerms(text, rel, symbolFacts.methods, symbolFacts.symbols.filter((item) => ["class", "interface", "enum", "record", "object"].includes(item.type))));
+  for (const column of gridColumns) {
+    if (!column.header || !HANGUL.test(column.header)) continue;
+    for (const term of termPieces(column.header)) terms.push({ term, kind: "label", file: rel, line: column.line, symbol: column.field });
+  }
+  return { gridColumns, terms };
 }
 
 function unique(items, key) {
@@ -1738,7 +3120,7 @@ function gitCommit(root) {
  * clone·OS·로케일과 무관하게 같은 내용이면 같은 값이고 실측 2ms다. git이 아니거나 실패하면
  * 파일 목록과 크기로 대체한다(같은 보장은 아니지만 없는 것보다 낫다).
  */
-function sourceFingerprint(root, includePaths, files) {
+function sourceFingerprint(root, includePaths, files, knownHashes = null) {
   /*
    * 지문은 **인덱싱 대상 파일만** 덮는다. git이 보고하는 전체 변경을 그대로 쓰면
    * `_workspace/`나 README 같은 비대상 파일 때문에 항상 "변경됨"이 되어 쓸모가 없다
@@ -1751,6 +3133,8 @@ function sourceFingerprint(root, includePaths, files) {
   const digest = (label, payload) => `${label}:${createHash("sha1").update(payload).digest("hex").slice(0, 16)}`;
   const indexed = files.map((file) => file.rel).sort(byCodeUnit);
   const contentHash = (rel) => {
+    const known = knownHashes?.get(rel);
+    if (known) return known;
     const full = join(root, rel);
     try {
       return createHash("sha1").update(readFileSync(full)).digest("hex");
@@ -1786,9 +3170,18 @@ function sourceFingerprint(root, includePaths, files) {
   return digest("content", indexed.map((rel) => `${rel}:${contentHash(rel)}`).join("\n"));
 }
 
+/*
+ * 인덱스 출력 위치. 기본값은 지금까지와 같은 `<root>/_workspace/index`다.
+ * `--index-dir`(또는 options.indexDir)는 기본값을 바꾸려는 것이 아니라, 같은 인덱서를 다른 상태
+ * 디렉터리(예: CLI의 `.axnavi/index`)에 겨눌 수 있게 열어 두기 위한 것이다. 넘기지 않으면 동작이 같다.
+ */
+export function resolveIndexDir(root, indexDir) {
+  return indexDir ? (isAbsolute(indexDir) ? indexDir : join(resolve(root), indexDir)) : join(resolve(root), "_workspace", "index");
+}
+
 /* 커밋된 인덱스를 받은 팀원이 "다시 인덱싱해야 하나"를 LLM 없이 판정한다. */
-export function indexStaleness(root) {
-  const metaPath = join(resolve(root), "_workspace", "index", "_meta.json");
+export function indexStaleness(root, indexDir) {
+  const metaPath = join(resolveIndexDir(root, indexDir), "_meta.json");
   if (!existsSync(metaPath)) return { stale: true, reason: "인덱스 없음" };
   const meta = readJson(metaPath, {});
   if (meta.version !== INDEXER_VERSION) return { stale: true, reason: `인덱서 버전 변경 (${meta.version} → ${INDEXER_VERSION})` };
@@ -1852,7 +3245,49 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   const bindings = facts.flatMap((item) => item.bindings || []);
   const nodes = unique([...facts.flatMap((item) => item.nodes), ...bindings.map((item) => ({ id: `trigger:${item.trigger}`, type: "trigger", file: item.file, line: item.line, workspace: item.workspace, origin: "deterministic-indexer", confidence: "HIGH" }))], (item) => item.id);
   const callSites = facts.flatMap((item) => item.callSites);
+  /*
+   * Java·C# → 저장 프로시저. 문자열의 `{call PKG.PROC}`은 extractSql이 호출 위치까지 남기고,
+   * MyBatis CALLABLE 매퍼는 그 SQL id를 쓰는 메서드에서 부른 것으로 본다. 이름 해석은 일반 호출과 같다.
+   */
+  const allSqls = facts.flatMap((item) => item.sqls);
+  const callables = facts.flatMap((item) => item.callables || []);
+  /*
+   * 쿼리 id 되짚기. iBatis sqlMap의 id는 `Order.list`인데 useStatementNamespaces=false 프로젝트의
+   * Java는 `"list"`만 쓴다. 짧은 id가 전체에서 하나일 때만 바꾸고, 둘 이상이면 모호하므로 그대로 둔다.
+   */
+  const knownStatementIds = new Set([...allSqls, ...callables].map((item) => item.id));
+  const byShortId = new Map();
+  for (const item of [...allSqls, ...callables]) {
+    if (!item.statement_id) continue;
+    const seen = byShortId.has(item.statement_id);
+    byShortId.set(item.statement_id, seen && byShortId.get(item.statement_id) !== item.id ? null : item.id);
+  }
+  const resolveStatementId = (id) => (knownStatementIds.has(id) ? id : byShortId.get(id) || id);
+  const callableSqls = new Map([...allSqls.filter((item) => item.procedure), ...callables].map((item) => [item.id, item.procedure]));
+  const seenCallableUsage = new Set();
+  for (const fact of facts) {
+    for (const call of fact.procedureCalls || []) callSites.push({ ...call, workspace: workspaceFor(call.file, config).id });
+    for (const usage of fact.usages) {
+      const sqlId = resolveStatementId(usage.sql_id);
+      const target = callableSqls.get(sqlId);
+      const key = `${sqlId}:${usage.file}:${usage.line}`;
+      if (!target || usage.method === "unknown" || usage.method === sqlId || seenCallableUsage.has(key)) continue;
+      seenCallableUsage.add(key);
+      callSites.push({ caller: usage.method, ...procedureTarget(target), file: usage.file, line: usage.line, workspace: workspaceFor(usage.file, config).id });
+    }
+  }
   const injects = facts.flatMap((item) => item.injects);
+  /*
+   * XML 빈 — 이름·별칭 → 정의. 주입 필드(`owner::필드`) → 빈 이름(@Resource name, 없으면 필드 이름).
+   * 선언 타입이 저장소 밖(프레임워크 jar)이면 호출이 갈 노드가 없어 버렸는데, 그 필드가 XML 빈이면
+   * 빈 노드로 잇는다 — `egovIdGnrService.getNextStringId()`가 어느 설정의 무엇인지가 지도에 남는다.
+   */
+  const springBeanByName = new Map();
+  for (const bean of facts.flatMap((item) => item.springBeans || [])) {
+    for (const name of [bean.id, ...(bean.aliases || [])]) if (!springBeanByName.has(name)) springBeanByName.set(name, bean);
+  }
+  const injectedBeanName = new Map(injects.filter((item) => item.fieldName).map((item) => [`${item.owner}::${item.fieldName}`, item.beanName || item.fieldName]));
+  const beanCalls = [];
   /*
    * 한정자 → 타입 사전. `owner클래스::필드명` → 타입명.
    * 이게 없으면 `sqlSession.insert(...)` 같은 프레임워크 호출에서 한정자가 아무 후보와도
@@ -1864,15 +3299,67 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   for (const field of facts.flatMap((item) => item.fields || [])) {
     fieldTypes.set(`${field.owner}::${field.fieldName}`, field.typeName);
   }
+  /* `호출 메서드::변수명` → [{ line, typeName }] 선언 순. 지역 변수·파라미터는 같은 이름의 필드를 가린다. */
+  const localDeclarations = new Map();
+  for (const local of facts.flatMap((item) => item.locals || [])) {
+    const key = `${local.method}::${local.name}`;
+    const list = localDeclarations.get(key);
+    if (list) list.push(local); else localDeclarations.set(key, [local]);
+  }
+  /* 호출 줄 이전의 가장 가까운 선언. 없으면 undefined(필드로 넘어간다). */
+  const localTypeAt = (caller, name, line) => {
+    let found;
+    for (const local of localDeclarations.get(`${caller}::${name}`) || []) if (local.line <= line) found = local.typeName;
+    return found;
+  };
   const indexedSimpleNames = new Set(nodes.map((item) => item.id.split(".").at(-1)));
+  /*
+   * 상속 체인. 한정자 없는 호출은 같은 클래스에 없으면 부모 클래스 멤버다(`getLogger()`를 부모
+   * `DataAccesser`에서 물려받는 식 — 실측 미해결 195건). 부모 이름이 인덱스에서 클래스 하나로
+   * 정해질 때만 따라간다.
+   */
+  const symbolById = new Map(symbols.map((item) => [item.id, item]));
+  /* 타입 단순 이름 → 그것을 implements·extends하는 클래스 id(외부 jar 타입 포함) */
+  const implementorsOf = new Map();
+  for (const symbol of symbols) {
+    for (const base of [symbol.extends, ...(symbol.implements || [])].filter(Boolean)) {
+      const simple = String(base).split(".").at(-1).replace(/<.*/, "").trim();
+      const list = implementorsOf.get(simple);
+      if (list) list.push(symbol.id); else implementorsOf.set(simple, [symbol.id]);
+    }
+  }
+  const superClassOf = (classId) => {
+    const base = symbolById.get(classId)?.extends;
+    if (!base) return null;
+    const simple = String(base).split(".").at(-1).replace(/<.*/, "").trim();
+    const classes = (nodeBySimple.get(simple) || []).filter((item) => item.type === "class");
+    return classes.length === 1 ? classes[0].id : null;
+  };
   /* `pkg.Owner.method` → `pkg.Owner` (필드 사전의 키와 맞추기 위한 소유 클래스 id) */
   const ownerIdOf = (callerId) => String(callerId || "").split(".").slice(0, -1).join(".");
   const nodeBySimple = new Map();
+  /*
+   * 후보 좁히기용 색인. 호출마다 동명 후보 전체를 `filter`하면 `selectList`·`save`처럼 DAO마다 있는
+   * 이름에서 호출 수 × 후보 수가 되어, 2,500파일 합성 저장소에서 호출 해석만 2.4초였다(2026-09-24 실측).
+   * 소유 클래스 단순 이름(`OrderDao`)·소유 id(`com.acme.OrderDao`)와 메서드 이름을 키로 미리 묶는다.
+   */
+  const nodeByOwnerSimple = new Map();
+  const nodeByOwnerId = new Map();
+  const pushTo = (map, key, node) => { const list = map.get(key); if (list) list.push(node); else map.set(key, [node]); };
   for (const node of nodes) {
-    const simple = node.id.split(".").at(-1);
-    if (!nodeBySimple.has(simple)) nodeBySimple.set(simple, []);
-    nodeBySimple.get(simple).push(node);
+    /* 트리거 노드(`trigger:list.jsp#a.fnSave`)는 호출 대상이 아니다 — 점으로 자르면 끝이 `fnSave`라
+     * 같은 화면의 `fnSave()` 호출 후보로 끼어들어 호출이 모호해졌다. 바인딩 해석도 원래 트리거를 뺐다. */
+    if (node.type === "trigger") continue;
+    const parts = node.id.split(".");
+    const simple = parts.at(-1);
+    pushTo(nodeBySimple, simple, node);
+    if (parts.length > 1) pushTo(nodeByOwnerSimple, `${parts.at(-2)}\u0000${simple}`, node);
+    pushTo(nodeByOwnerId, `${parts.slice(0, -1).join(".")}\u0000${simple}`, node);
   }
+  const qualifierMemo = new Map();
+  const sameOwnerSafeExt = new Set([".java", ".kt", ".kts", ".cs", ".vue", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ...SQL_COMMENT_EXTENSIONS, ...PROC_EXTENSIONS, ...PB_EXTENSIONS,
+    /* 화면 인라인 스크립트의 한정자 없는 호출은 같은 화면 함수가 먼저다(JS 스코프와 같다). */
+    ".jsp", ".jspx", ".jspf", ".tag", ".asp", ".aspx", ".ascx", ".html", ".htm"]);
   /*
    * 이름이 겹치는 후보가 둘 이상일 때 스코프(같은 파일 → 같은 패키지 → 같은 워크스페이스)로 좁혀
    * 하나로 줄면 결정론적으로 확정하는 방안을 구현했다가 **되돌렸다**(2026-08-16).
@@ -1884,10 +3371,117 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
    * 미해결 항목의 실제 비용 문제는 아래 우선순위 정렬(판정 가능한 것부터)에서 해결한다.
    */
 
+  /*
+   * 화면 스크립트의 호출 범위. 다른 JSP 화면의 함수는 이 화면에 실리지 않으므로 후보가 아니다 —
+   * `function alert()`를 재정의한 화면 몇 개 때문에 모든 화면의 `alert()`가 모호해졌다(실측 438건).
+   * 같은 화면, (중첩) 인클루드한 파일, 마크업이 아닌 외부 스크립트(.js 등)만 남긴다.
+   */
+  const MARKUP_PAGE = /\.(?:jsp|jspx|jspf|tag|asp|aspx|ascx|html?)$/i;
+  const filesByBase = new Map();
+  for (const fact of facts) {
+    const base = fact.rel.split("/").at(-1);
+    const list = filesByBase.get(base);
+    if (list) list.push(fact.rel); else filesByBase.set(base, [fact.rel]);
+  }
+  const directIncludes = new Map();
+  for (const fact of facts) {
+    if (!fact.includes?.length) continue;
+    const resolved = [];
+    for (const raw of fact.includes) {
+      const target = raw.startsWith("/") ? raw.replace(/^\/+/, "") : slash(join(dirname(fact.rel), raw));
+      const hit = (filesByBase.get(target.split("/").at(-1)) || []).find((file) => file === target || file.endsWith(`/${target}`));
+      if (hit) resolved.push(hit);
+    }
+    directIncludes.set(fact.rel, resolved);
+  }
+  const pageScopeMemo = new Map();
+  const pageScope = (file) => {
+    if (pageScopeMemo.has(file)) return pageScopeMemo.get(file);
+    const scope = new Set([file]);
+    const stack = [file];
+    while (stack.length) for (const next of directIncludes.get(stack.pop()) || []) if (!scope.has(next)) { scope.add(next); stack.push(next); }
+    pageScopeMemo.set(file, scope);
+    return scope;
+  };
+  const inPageScope = (file, candidate) => !MARKUP_PAGE.test(candidate.file || "") || pageScope(file).has(candidate.file);
+  /* 화면(과 인클루드)이 `<script src>`로 싣는 파일. 후보가 여럿이면 실린 스크립트·같은 화면 쪽만 남긴다. */
+  const scriptsByFile = new Map(facts.filter((item) => item.scripts?.length).map((item) => [item.rel, item.scripts]));
+  const pathVarsByFile = new Map(facts.filter((item) => item.pathVars?.length).map((item) => [item.rel, item.pathVars]));
+  const propertyValues = new Map();
+  for (const [key, value] of facts.flatMap((item) => item.properties || [])) {
+    const list = propertyValues.get(key);
+    if (list) list.push(value); else propertyValues.set(key, [value]);
+  }
+  /*
+   * 경로 변수 값. 실행해야 아는 조각(`CONTEXT_PATH`·`strPath`) 뒤에 이어지는 확정 부분만 쓴다 —
+   * 앞부분을 모르는 채 이어 붙이면 틀린 경로가 되지만, 뒷부분은 그대로 파일 경로의 꼬리다.
+   */
+  const pathVarValues = (vars) => {
+    const values = new Map();
+    for (const variable of vars) {
+      const lastUnknown = variable.parts.map((part) => Boolean(part.unknown)).lastIndexOf(true);
+      let options = [""];
+      for (const part of variable.parts.slice(lastUnknown + 1)) {
+        const choices = part.literal !== undefined ? [part.literal] : propertyValues.get(part.key) || [""];
+        options = options.flatMap((prefix) => choices.map((choice) => prefix + choice));
+      }
+      values.set(variable.name, [...new Set([...(values.get(variable.name) || []), ...options])]);
+    }
+    return values;
+  };
+  /* `<%= JS_PATH %>forms.js` → `html/script/js/forms.js`. 모르는 식은 버리고 앞의 `/`·`./`를 떼어 경로 꼬리로 쓴다. */
+  const expandScript = (raw, vars) => {
+    let expansions = [raw];
+    for (const match of raw.matchAll(/<%=\s*(\w+)\s*%>/g)) {
+      const values = vars.get(match[1]) || [""];
+      expansions = expansions.flatMap((item) => values.map((value) => item.replace(match[0], value)));
+    }
+    return expansions.map((item) => item.replace(/<%[\s\S]*?%>|\$\{[^}]*\}/g, "").replace(/\/{2,}/g, "/").replace(/^(?:\.{0,2}\/)+/, "")).filter(Boolean);
+  };
+  const loadedMemo = new Map();
+  const loadedScripts = (file) => {
+    if (!loadedMemo.has(file)) {
+      const scope = [...pageScope(file)];
+      const vars = pathVarValues(scope.flatMap((item) => pathVarsByFile.get(item) || []));
+      loadedMemo.set(file, [...new Set(scope.flatMap((item) => (scriptsByFile.get(item) || []).flatMap((raw) => expandScript(raw, vars))))]);
+    }
+    return loadedMemo.get(file);
+  };
+  const preferLoaded = (file, candidates) => {
+    if (candidates.length < 2) return candidates;
+    const suffixes = loadedScripts(file);
+    if (!suffixes.length) return candidates;
+    const kept = candidates.filter((item) => MARKUP_PAGE.test(item.file || "")
+      || suffixes.some((suffix) => item.file === suffix || String(item.file).endsWith(`/${suffix}`)));
+    return kept.length ? kept : candidates;
+  };
+  /*
+   * 짝 저장소(pair_config.md)의 JS 함수. 서버 JSP가 `<script src>`로 별도 저장소(정적 자원·클라이언트)의 .js를
+   * 불러와 그 함수를 부르는 구조가 흔한데, 인덱스가 저장소마다 따로라 화면 이벤트가 전부 "대상 없음"이었다
+   * (실측 2,417건). API 계약만 합치던 것을 넘어, 짝 인덱스의 JS 함수를 화면 스크립트의 후보로 쓴다.
+   * 실제로 이어진 것만 `source: "external"` 노드로 남긴다 — 짝 저장소 인덱스가 먼저 만들어져 있어야 한다.
+   */
+  const externalBySimple = new Map();
+  for (const link of pairConfig(options.root)?.partners || []) {
+    const graph = readJson(join(link.partner_root, "_workspace", "index", "call_graph.json"), null);
+    if (!graph?.nodes) continue;
+    const label = basename(String(link.partner_root).replace(/[\\/]+$/, ""));
+    for (const node of graph.nodes) {
+      if (node.source === "external" || !["method", "function"].includes(node.type)) continue;
+      if (!JS_FAMILY_EXTENSIONS.includes(extname(node.file || "").toLowerCase())) continue;
+      const simple = node.id.split(".").at(-1);
+      const external = { id: `ext:${label}:${node.id}`, type: "external_function", file: node.file, line: node.line, source: "external", external_repo_path: link.partner_root, workspace: `partner:${label}`, origin: "deterministic-indexer", confidence: "MEDIUM" };
+      const list = externalBySimple.get(simple);
+      if (list) list.push(external); else externalBySimple.set(simple, [external]);
+    }
+  }
+  const pageCandidates = (file, name, own) => preferLoaded(file, [...own, ...(externalBySimple.get(name) || [])].filter((item) => inPageScope(file, item)));
+
   const edges = [];
   const unresolved = [];
   for (const binding of bindings) {
-    let candidates = (nodeBySimple.get(binding.handler_name) || []).filter((item) => item.type !== "trigger");
+    let candidates = preferConcrete((nodeBySimple.get(binding.handler_name) || []).filter((item) => item.type !== "trigger"));
+    if (MARKUP_PAGE.test(binding.file || "")) candidates = pageCandidates(binding.file, binding.handler_name, candidates);
     /*
      * 템플릿 이벤트 핸들러(@click 등)·markup 이벤트는 반드시 같은 파일의 스크립트 블록에
      * 정의된 메서드다 — qualifier 기반 호출(obj.method())과 달리 "다른 객체를 통한 동명
@@ -1898,16 +3492,23 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
      * 1,100개 근사-반복 화면에서 handler 이름(save/search 등)이 겹치는 경우가 흔해(2026-08-19
      * 실측, Vue 템플릿 이벤트 바인딩 추출 추가 직후 미해결 5,300건 급증 확인) 이 좁히기 없이는
      * 템플릿 이벤트 추출 자체가 손해가 된다.
+     * process_entry(`main`)·scheduler(`@Scheduled` 바로 아래 메서드)도 같은 파일의 메서드에서
+     * 만들어진 바인딩이라 다른 파일을 가리킬 수 없다 — 배치 프로그램마다 `main`이 있는 Pro*C·Java
+     * 배치에서 진입점이 전부 모호하다고 AI 판정 대기열에 올라가던 것을 막는다(2026-09-24).
      */
-    if (candidates.length > 1 && (binding.type === "ui_event" || binding.type === "markup_event")) {
+    if (candidates.length > 1 && ["ui_event", "markup_event", "process_entry", "scheduler"].includes(binding.type)) {
       const sameFile = candidates.filter((item) => item.file === binding.file);
       if (sameFile.length === 1) candidates = sameFile;
     }
     if (candidates.length === 1) edges.push({ from: `trigger:${binding.trigger}`, to: candidates[0].id, type: binding.type, file: binding.file, line: binding.line, workspace: binding.workspace, origin: "deterministic-indexer", confidence: "HIGH" });
     else unresolved.push({ kind: "unresolved_trigger", trigger: binding.trigger, handler_name: binding.handler_name, candidates: candidates.map((item) => item.id), file: binding.file, line: binding.line, workspace: binding.workspace });
   }
+  /** 본체 소스가 없는 저장 프로시저. 호출 엣지의 대상으로만 쓰인다. @type {Map<string, any>} */
+  const dbProcedures = new Map();
   for (const call of callSites) {
     let candidates = nodeBySimple.get(call.name) || [];
+    /* 한정자 없는 화면 스크립트 호출만 좁힌다 — `opener.fnX()`·`parent.fnX()`는 정당하게 다른 화면을 가리킨다. */
+    if (!call.qualifier && MARKUP_PAGE.test(call.file || "")) candidates = pageCandidates(call.file, call.name, candidates);
     if (call.qualifier) {
       /*
        * 한정자를 **선언 타입**으로 먼저 해석한다. `sqlSession.insert(...)`의 `sqlSession`은
@@ -1915,15 +3516,29 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
        * 예전에는 이름이 겹치지 않으면 후보를 그대로 두어(아래 폴백) 오답뿐인 목록이
        * LLM 판정 대기열로 갔다. 타입을 알면 셋 중 하나로 정확히 갈린다.
        */
-      const declaredType = fieldTypes.get(`${ownerIdOf(call.caller)}::${call.qualifier}`);
-      if (declaredType) {
-        if (!indexedSimpleNames.has(declaredType)) {
-          /* 선언 타입이 인덱스에 없다 = 프레임워크·외부 라이브러리 호출. 엣지도 미해결도 만들지 않는다
-           * (후보가 0개일 때 버리는 기존 규칙과 같은 처리다). */
-          continue;
+      const localType = localTypeAt(call.caller, call.qualifier, call.line);
+      const declaredType = localType !== undefined ? localType : fieldTypes.get(`${ownerIdOf(call.caller)}::${call.qualifier}`);
+      /* 클래스 이름 그대로인 한정자(`Pager.calBetweenRow`)는 정적 호출이다 — 부분 문자열(`FrontPager`)이 아니라 정확히 그 클래스. */
+      const staticOwner = !declaredType && /^[A-Z]/.test(call.qualifier) ? nodeByOwnerSimple.get(`${call.qualifier}\u0000${call.name}`) : null;
+      if (staticOwner?.length) {
+        candidates = staticOwner;
+      } else if (declaredType) {
+        candidates = indexedSimpleNames.has(declaredType) ? nodeByOwnerSimple.get(`${declaredType}\u0000${call.name}`) || [] : [];
+        /*
+         * 선언 타입에 그 메서드 본문이 없으면(외부 jar 인터페이스 `User`, 본문 없는 인터페이스 선언)
+         * 그 타입을 implements·extends한 우리 클래스의 메서드로 간다 — `User user; user.getLoginId()`는
+         * 런타임에 `UserSession implements User`로 디스패치된다. 구현이 없으면 외부 호출이라 버린다.
+         */
+        if (candidates.every((item) => item.abstract)) {
+          /* 본문 없는 선언만 있으면 구현 쪽이 먼저다. 구현이 없을 때만(MyBatis Mapper) 선언이 종착점이다. */
+          const implemented = (implementorsOf.get(declaredType) || []).flatMap((classId) => nodeByOwnerId.get(`${classId}\u0000${call.name}`) || []);
+          if (implemented.length) candidates = implemented;
+          if (!candidates.length) {
+            const bean = localType === undefined ? springBeanByName.get(injectedBeanName.get(`${ownerIdOf(call.caller)}::${call.qualifier}`)) : null;
+            if (bean) beanCalls.push({ call, bean });
+            continue;
+          }
         }
-        const typed = candidates.filter((item) => item.id.split(".").slice(0, -1).at(-1) === declaredType);
-        candidates = typed;
       } else {
         /*
          * 선언 타입을 못 찾은 한정자(대부분 지역변수 — fieldTypes는 필드만 추적한다)는
@@ -1937,7 +3552,9 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
          * 처리해야 이런 케이스가 미해결 목록에 쌓이지 않는다(실측: 백엔드 미해결 9,691건이
          * 전부 이 한 가지 패턴이었다).
          */
-        candidates = candidates.filter((item) => item.id.toLowerCase().includes(call.qualifier.toLowerCase()));
+        const memoKey = `${call.name}\u0000${call.qualifier.toLowerCase()}`;
+        if (!qualifierMemo.has(memoKey)) qualifierMemo.set(memoKey, candidates.filter((item) => item.id.toLowerCase().includes(call.qualifier.toLowerCase())));
+        candidates = qualifierMemo.get(memoKey);
       }
     }
     /*
@@ -1961,11 +3578,35 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
      * `setup()` 안에서 지역 함수 `setPassword`를 바로 호출하는 경우가 정확히 이 패턴이었고,
      * 실제로 같은 파일의 그 함수를 가리키는 게 맞았다).
      */
-    const sameOwnerSafeExt = [".java", ".kt", ".kts", ".cs", ".vue", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"];
-    if (!call.qualifier && candidates.length > 1 && sameOwnerSafeExt.includes(extname(call.file).toLowerCase())) {
-      const callerOwner = ownerIdOf(call.caller);
-      const sameClass = candidates.filter((item) => ownerIdOf(item.id) === callerOwner);
+    /* 선언과 구현이 함께 후보면 구현이다 — 인터페이스 선언이 생긴 뒤에도 기존 해석 결과를 바꾸지 않는다. */
+    candidates = preferConcrete(candidates);
+    /* `new QueryUpdateException(...)`는 클래스 노드와 생성자 노드(`X.X`)가 함께 후보가 된다 — 생성자다. */
+    if (candidates.length > 1) {
+      const constructors = (nodeByOwnerSimple.get(`${call.name}\u0000${call.name}`) || []).filter((item) => item.type === "method" && candidates.includes(item));
+      if (constructors.length === 1) candidates = constructors;
+    }
+    const callExt = extname(call.file).toLowerCase();
+    if (!call.qualifier && candidates.length > 1 && sameOwnerSafeExt.has(callExt)) {
+      const sameClass = nodeByOwnerId.get(`${ownerIdOf(call.caller)}\u0000${call.name}`) || [];
       if (sameClass.length === 1) candidates = sameClass;
+      else if (!sameClass.length && [".java", ".kt", ".kts", ".cs"].includes(callExt)) {
+        for (let ancestor = superClassOf(ownerIdOf(call.caller)), depth = 0; ancestor && depth < 10; ancestor = superClassOf(ancestor), depth += 1) {
+          const inherited = nodeByOwnerId.get(`${ancestor}\u0000${call.name}`) || [];
+          if (inherited.length === 1) { candidates = inherited; break; }
+          if (inherited.length > 1) break;
+        }
+      }
+    }
+    /*
+     * 저장 프로시저 본체가 이 저장소에 없으면(DB 에만 있음) 후보가 0개라 연결이 조용히 버려졌다.
+     * 실측(eduLms): 수강신청 등록 PR_LS_APPLY_FRONT_PROC 를 부르는 메서드 10곳이 call_graph 에 없어
+     * 영향도 분석이 프로시저를 거치는 변경을 볼 수 없었다. 외부 DB 프로시저 노드로 남겨 잇는다.
+     */
+    if (!candidates.length && call.procedure) {
+      const id = `db:${call.qualifier ? `${call.qualifier}.` : ""}${call.name}`;
+      if (!dbProcedures.has(id)) dbProcedures.set(id, { id, type: "db_procedure", name: call.name, file: call.file, line: call.line, source: "external", workspace: call.workspace, origin: "deterministic-indexer", confidence: "MEDIUM" });
+      edges.push({ from: call.caller, to: id, type: "call", file: call.file, line: call.line, workspace: call.workspace, origin: "deterministic-indexer", confidence: "MEDIUM" });
+      continue;
     }
     if (candidates.length === 1 && candidates[0].id !== call.caller) {
       edges.push({ from: call.caller, to: candidates[0].id, type: "call", file: call.file, line: call.line, workspace: call.workspace, origin: "deterministic-indexer", confidence: call.qualifier ? "HIGH" : "MEDIUM" });
@@ -1973,6 +3614,23 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
       unresolved.push({ kind: "ambiguous_call", caller: call.caller, expression: `${call.qualifier ? `${call.qualifier}.` : ""}${call.name}(...)`, candidates: candidates.map((item) => item.id), file: call.file, line: call.line, workspace: call.workspace });
     }
   }
+  nodes.push(...dbProcedures.values());
+  /* 부른 빈과, 그 빈이 property ref 로 물고 있는 빈(3단계까지)을 노드로 둔다. */
+  const beanNodes = new Map();
+  const addBeanNode = (bean, depth) => {
+    const id = `bean:${bean.id}`;
+    if (beanNodes.has(id)) return id;
+    beanNodes.set(id, { id, type: "spring_bean", name: bean.id, class: bean.className, file: bean.file, line: bean.line, properties: bean.properties || [], workspace: workspaceFor(bean.file, config).id, origin: "deterministic-indexer", confidence: "HIGH" });
+    for (const property of depth < 3 ? bean.properties || [] : []) {
+      const target = property.ref && springBeanByName.get(property.ref);
+      if (target) edges.push({ from: id, to: addBeanNode(target, depth + 1), type: "bean_ref", property: property.name, file: bean.file, line: bean.line, workspace: workspaceFor(bean.file, config).id, origin: "deterministic-indexer", confidence: "HIGH" });
+    }
+    return id;
+  };
+  for (const { call, bean } of beanCalls) {
+    edges.push({ from: call.caller, to: addBeanNode(bean, 0), type: "bean_call", member: call.name, file: call.file, line: call.line, workspace: call.workspace, origin: "deterministic-indexer", confidence: "MEDIUM" });
+  }
+  nodes.push(...beanNodes.values());
   for (const injection of injects) {
     const candidates = nodeBySimple.get(injection.targetName) || [];
     if (candidates.length === 1) edges.push({ from: injection.owner, to: candidates[0].id, type: "inject", file: injection.file, line: injection.line, workspace: injection.workspace, origin: "deterministic-indexer", confidence: "HIGH" });
@@ -2045,15 +3703,22 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
       matchedEndpoints.add(endpoint.id); matchedConsumers.add(consumer.id);
     }
   }
-  const sqls = unique(facts.flatMap((item) => item.sqls), (item) => item.id);
+  const sqls = unique(allSqls, (item) => item.id);
   /* 후보(쿼리 ID 상수 참조)는 실제로 존재하는 SQL id일 때만 사용처로 인정한다 — 그냥 대문자 상수와 구분. */
   const sqlIds = new Set(sqls.map((item) => item.id));
+  /* 프로시저 호출 문장을 쓰는 곳은 위에서 call_graph 엣지가 됐다 — SQL 사용처로 두 번 세지 않는다. */
+  const callableIds = new Set(callables.map((item) => item.id));
   const usages = unique(
-    facts.flatMap((item) => item.usages).filter((item) => !item.candidate || sqlIds.has(item.sql_id)),
+    facts.flatMap((item) => item.usages)
+      .map((item) => ({ ...item, sql_id: resolveStatementId(item.sql_id) }))
+      .filter((item) => !callableIds.has(item.sql_id) && (!item.candidate || sqlIds.has(item.sql_id))),
     (item) => `${item.sql_id}:${item.file}:${item.line}`,
   ).map(({ candidate, ...rest }) => rest);
   const sqlRelations = unique(facts.flatMap((item) => item.relations || []), (item) => `${item.from_table}:${item.from_columns?.join(",")}:${item.to_table}:${item.to_columns?.join(",")}:${item.file}:${item.line}`);
-  const boundaries = unique(facts.flatMap((item) => item.boundaries), (item) => item.id);
+  const boundaries = unique([
+    ...facts.flatMap((item) => item.boundaries),
+    ...springTransactionBoundaries(facts.map((item) => item.springTx).filter(Boolean), nodes, config),
+  ], (item) => item.id);
   const communications = unique(facts.flatMap((item) => item.communications), (item) => item.id);
   const profiles = [...new Set(facts.flatMap((item) => item.env.profiles))];
   const branches = unique(facts.flatMap((item) => item.env.branches), (item) => `${item.file}:${item.line}:${item.marker}`);
@@ -2076,10 +3741,23 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
    * 예전에는 _meta.edge_count만 중복 포함 배열 길이로 기록돼 실제 edges 배열과 어긋났고
    * (validator_checks가 count 불일치로 FAIL), in-degree도 같은 관계를 여러 번 세고 있었다.
    */
+  const dispatch = linkDispatch(facts, options, config, springBeanByName, nodeByOwnerId, nodes, edges);
   const uniqueEdges = unique(edges, (item) => `${item.from}:${item.to}:${item.type}`);
+  /* 짝 저장소 함수는 실제로 이어진 것만 노드로 남긴다(전부 넣으면 짝 저장소 함수 수천 개가 여기 그래프를 채운다). */
+  if (externalBySimple.size) {
+    const referenced = new Set(uniqueEdges.map((item) => item.to).filter((id) => id.startsWith("ext:")));
+    for (const list of externalBySimple.values()) for (const node of list) if (referenced.has(node.id)) { nodes.push(node); referenced.delete(node.id); }
+  }
   const { inDegree } = degreeMaps(nodes, uniqueEdges);
-  /* 데드 코드 후보는 전 Tier에서 계산한다. Full 전용이면 Lite/Standard 분석이 유지보수 위험을 볼 근거를 잃는다. */
-  const unusedMethods = deadCodeCandidates(nodes, inDegree, uniqueEdges, endpoints);
+  /* 데드 코드 후보는 전 Tier에서 계산한다. Full 전용이면 Standard 분석이 유지보수 위험을 볼 근거를 잃는다. */
+  const deadCandidates = deadCodeCandidates(nodes, inDegree, uniqueEdges, endpoints);
+  /*
+   * 디스패치 규칙이 닿는 메서드는 호출이 코드에 없어도 죽은 코드가 아니다. 규칙에 맞는 이름인데 이번에 이어진
+   * 호출이 없으면 "디스패치로 불릴 수 있음" 으로 따로 둔다 — v1 은 이것을 죽은 코드로 내 axnavi 가 삭제를 진행했다.
+   */
+  const dispatchReachable = dispatchReachableMethod(dispatch.rules, springBeanByName);
+  const unusedMethods = deadCandidates.filter((item) => !dispatchReachable(item.id));
+  const dispatchUnlinked = deadCandidates.filter((item) => dispatchReachable(item.id)).map((item) => ({ id: item.id, file: item.file, line: item.line, reason: "디스패치 규칙으로 불릴 수 있는 메서드 — 이번 인덱스에서 이어진 호출은 없음(짝 저장소 인덱스를 먼저 만들면 이어진다)" }));
   /*
    * _meta 9필드는 이 저장소의 계약이다(docs/index-spec.md, validator_checks._meta_field_issues).
    * files_scanned/files_total은 analyzer_index_summary가 "분석 커버리지 N/M" 줄로 렌더한다.
@@ -2100,7 +3778,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   const globalMeta = {
     ...common, source_file_count: sourceFileCount, latest_source_commit: commit, latest_source_mtime: latestMtime,
     /* 팀원이 재인덱싱 필요 여부를 판정하는 값 — `--check-stale` 참조. */
-    source_fingerprint: sourceFingerprint(options.root, config.include_paths, sourceFiles),
+    source_fingerprint: sourceFingerprint(options.root, config.include_paths, sourceFiles, new Map(facts.map((item) => [item.rel, item.contentSha1]))),
     tier: options.tier, indexes: [], init_layout: config.init_layout, include_paths: config.include_paths.map((item) => item || "."), workspace_mode: config.workspace_mode, workspaces: config.workspaces,
     unresolved_count: unresolved.length,
     encoding: buildEncodingSummary(facts),
@@ -2123,6 +3801,10 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
     call_graph: { _meta: { ...common, node_count: nodes.length, edge_count: uniqueEdges.length }, nodes, edges: uniqueEdges },
   };
   if (sqls.length || usages.length) output.sql_usage = { _meta: common, sqls, usages };
+  const glossary = [...facts.flatMap((item) => item.terms || []), ...messageRefTerms(facts)];
+  if (glossary.length) output.glossary = { _meta: common, entries: glossary };
+  const uiColumns = facts.flatMap((item) => item.gridColumns || []);
+  if (uiColumns.length) output.ui_columns = { _meta: common, columns: uiColumns };
   if (boundaries.length) output.transactions = { _meta: common, boundaries };
   if (communications.length) output.external_io = { _meta: common, communications };
   if (branches.length) output.env_branches = { _meta: common, profiles, branches };
@@ -2153,7 +3835,8 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
     unmatched_endpoints: endpoints.filter((item) => !matchedEndpoints.has(item.id)).map((item) => item.id),
     unmatched_consumers: consumers.filter((item) => !matchedConsumers.has(item.id)).map((item) => item.id),
   };
-  if (unusedMethods.length) output.dead_code = { _meta: common, unused_methods: unusedMethods, unused_sql_ids: [], unused_jsps: [] };
+  if (unusedMethods.length || dispatchUnlinked.length) output.dead_code = { _meta: common, unused_methods: unusedMethods, unused_sql_ids: [], unused_jsps: [], ...(dispatchUnlinked.length ? { dispatch_unlinked: dispatchUnlinked } : {}) };
+  if (dispatch.calls.length || dispatch.rules.length || dispatch.result_keys.length) output.dispatch = { _meta: { ...common, rule_count: dispatch.rules.length, call_count: dispatch.calls.length }, ...dispatch };
   const clientIndex = deriveClientIndex(facts, nodes, options.root);
   if (clientIndex) output.client_index = { _meta: common, ...clientIndex };
   const beanClassById = new Map(facts.flatMap((item) => item.springBeans || []).map((item) => [item.id, item.className]));
@@ -2283,7 +3966,7 @@ function deriveDataFlow(endpoints, edges, sqls, usages, nodes, beanClassById) {
   }
   const calleesOf = new Map();
   for (const edge of edges) {
-    if (edge.type !== "call") continue;
+    if (edge.type !== "call" && edge.type !== "dispatch") continue;
     const list = calleesOf.get(edge.from) || [];
     list.push(edge.to);
     calleesOf.set(edge.from, list);
@@ -2384,6 +4067,83 @@ const TRIGGER_EDGE_TYPES = new Set(["ui_event", "markup_event", "scheduler", "pr
  * 화이트리스트를 여기서 적용한다 — 확실한 진입점은 제외하고, 파일만 겹쳐 애매한 것은
  * 버리지 않고 entrypoint_suspect로 표시해 판단을 사람/LLM에게 남긴다.
  */
+/* 후보에 본문 있는 메서드가 하나라도 있으면 본문 없는 선언(interface · abstract)은 뺀다. */
+function preferConcrete(candidates) {
+  if (candidates.length < 2 || !candidates.some((item) => item.abstract)) return candidates;
+  const concrete = candidates.filter((item) => !item.abstract);
+  return concrete.length ? concrete : candidates;
+}
+
+/*
+ * 문자열 디스패치를 잇는다.
+ *
+ * 1) 규칙: 설정(dispatch_rules) + 호출 모양에서 추론(빈 이름 · 메서드가 실제로 있어야 규칙이 된다).
+ * 2) 이 저장소의 호출과 짝 저장소(pair_config)의 호출을 규칙으로 풀어 빈 클래스의 메서드에 `dispatch` 엣지를 단다.
+ *    짝 저장소 호출은 그쪽 인덱스(dispatch.json)를 읽는다 — 짝 저장소 인덱스가 먼저 있어야 한다.
+ * 3) 결과: 규칙 · 호출(해석 결과 포함) · 결과 이름. query-index 의 impact 가 이것으로 화면까지 따라간다.
+ */
+function linkDispatch(facts, options, config, springBeanByName, nodeByOwnerId, nodes, edges) {
+  const own = facts.flatMap((item) => item.dispatchCalls || []);
+  const resultKeys = facts.flatMap((item) => item.resultKeys || []);
+  /** 짝 저장소의 호출 — 라벨을 붙여 둔다. */
+  const partnerCalls = [];
+  for (const link of pairConfig(options.root)?.partners || []) {
+    const index = readJson(join(link.partner_root, "_workspace", "index", "dispatch.json"), null);
+    if (!index?.calls) continue;
+    const label = basename(String(link.partner_root).replace(/[\\/]+$/, ""));
+    for (const call of index.calls) partnerCalls.push({ ...call, repo: label });
+  }
+  const beanClass = (id) => springBeanByName.get(id)?.className || null;
+  const hasMethod = (cls, name) => nodeByOwnerId.has(`${cls}\u0000${name}`);
+  const inferred = inferDispatchRules([...own, ...partnerCalls], beanClass, hasMethod);
+  const rules = [...(config.dispatch_rules || []), ...inferred.filter((rule) => !(config.dispatch_rules || []).some((c) => c.endpoint === rule.endpoint && c.bean_param === rule.bean_param && c.method_param === rule.method_param))];
+  const resolve1 = (call) => {
+    const hit = resolveCall(call, rules);
+    if (!hit) return null;
+    const cls = beanClass(hit.bean);
+    const target = cls ? (nodeByOwnerId.get(`${cls}\u0000${hit.method}`) || [])[0] : null;
+    return { bean: hit.bean, method: hit.method, ...(target ? { method_id: target.id } : {}) };
+  };
+  const nodeIds = new Set(nodes.map((item) => item.id));
+  const calls = own.map((call) => {
+    const resolved = resolve1(call);
+    if (resolved?.method_id) {
+      const from = call.function_id && nodeIds.has(call.function_id) ? call.function_id : `dispatch:${call.file}:${call.line}`;
+      edges.push({ from, to: resolved.method_id, type: "dispatch", file: call.file, line: call.line, evidence: `${call.endpoint} ${Object.entries(call.params).map(([k, v]) => `${k}=${v}`).join("&")}`, origin: "deterministic-indexer", confidence: "HIGH" });
+    }
+    return resolved ? { ...call, resolved } : call;
+  });
+  const partnerLinks = [];
+  for (const call of partnerCalls) {
+    const resolved = resolve1(call);
+    if (!resolved?.method_id) continue;
+    const id = `ext:${call.repo}:${call.file}:${call.line}`;
+    if (!nodeIds.has(id)) {
+      nodes.push({ id, type: "external_function", file: call.file, line: call.line, source: "external", workspace: `partner:${call.repo}`, origin: "deterministic-indexer", confidence: "HIGH" });
+      nodeIds.add(id);
+    }
+    edges.push({ from: id, to: resolved.method_id, type: "dispatch", file: call.file, line: call.line, evidence: `${call.repo}: ${call.endpoint}`, origin: "deterministic-indexer", confidence: "HIGH" });
+    partnerLinks.push({ repo: call.repo, file: call.file, line: call.line, method_id: resolved.method_id });
+  }
+  return { rules, calls, result_keys: resultKeys, partner_links: partnerLinks };
+}
+
+/* 디스패치 규칙이 닿을 수 있는 메서드인가 — 빈으로 등록된 클래스의, 규칙 이름 모양에 맞는 공개 메서드. */
+function dispatchReachableMethod(rules, springBeanByName) {
+  if (!rules.length) return () => false;
+  const beanClasses = new Set([...springBeanByName.values()].map((bean) => bean.className));
+  const patterns = [...new Set(rules.map((rule) => rule.method_template))].map((template) => {
+    const [pre = "", post = ""] = template.split(/\{action\}|\{Action\}/i);
+    const upper = /\{Action\}/.test(template);
+    return new RegExp(`^${pre}${upper ? "[A-Z]" : "[A-Za-z_]"}\\w*${post}$`);
+  });
+  return (id) => {
+    const parts = String(id).split(".");
+    const name = parts.at(-1);
+    return beanClasses.has(parts.slice(0, -1).join(".")) && patterns.some((re) => re.test(name));
+  };
+}
+
 function deadCodeCandidates(nodes, inDegree, edges, endpoints) {
   const triggerTargets = new Set(edges.filter((item) => TRIGGER_EDGE_TYPES.has(item.type)).map((item) => item.to));
   const handlerKeys = new Set();
@@ -2403,7 +4163,8 @@ function deadCodeCandidates(nodes, inDegree, edges, endpoints) {
     if (endpoint.file) handlerFiles.add(endpoint.file);
   }
   return nodes
-    .filter((item) => item.type === "method" && item.visibility !== "private" && (inDegree.get(item.id) || 0) === 0)
+    /* 본문 없는 선언은 구현을 통해 불리므로 들어오는 엣지가 없어도 죽은 코드가 아니다. */
+    .filter((item) => item.type === "method" && !item.abstract && item.visibility !== "private" && (inDegree.get(item.id) || 0) === 0)
     .filter((item) => {
       const name = item.id.split(".").at(-1);
       if (triggerTargets.has(item.id)) return false;
@@ -2616,7 +4377,103 @@ function groupUnresolvedDecidable(decidableItems) {
     .map((group) => ({ group_id: `g-${createHash("sha256").update(JSON.stringify([group.kind, group.key_field, group.candidates])).digest("hex").slice(0, 24)}`, ...group, occurrence_count: group.occurrences.length }));
 }
 
-function buildAnalysisInput(output, globalMeta, unresolved, decidableCount, decidableGroupCount, fileSizes = new Map()) {
+/*
+ * 테스트·배포 모델 인벤토리 — analyzer가 "테스트 프레임워크가 무엇이고, 어디에 테스트가 있고,
+ * 어떻게 빌드·배포되는가"를 소스 재순회 없이 알 수 있게 파일명·매니페스트만 보고 만든다.
+ * test-generator는 기존 테스트 관행을 따라야 하고 plan-migration은 배포 모델(컨테이너·CI·앱서버)을
+ * 회귀 기준선으로 삼아야 하는데, 지금까지 그 인벤토리를 만드는 단계가 없었다.
+ * 내용 판단은 하지 않는다 — 매니페스트에서 의존성 이름을 정규식으로 찾고 배포 파일은 이름으로만 잡는다.
+ */
+const TEST_FRAMEWORK_SIGNATURES = [
+  ["JUnit", /\bjunit\b/i], ["TestNG", /\btestng\b/i], ["Mockito", /\bmockito\b/i], ["Spock", /spock-core/i],
+  ["pytest", /\bpytest\b/i], ["Jest", /"jest"|\bjest\b/i], ["Mocha", /"mocha"/i], ["Vitest", /\bvitest\b/i],
+  ["Jasmine", /\bjasmine\b/i], ["Karma", /"karma"/i], ["Cypress", /\bcypress\b/i], ["Playwright", /@playwright\/test|\bplaywright\b/i],
+  ["xUnit", /\bxunit\b/i], ["NUnit", /\bnunit\b/i], ["MSTest", /MSTest|Microsoft\.NET\.Test\.Sdk/i], ["RSpec", /\brspec\b/i],
+];
+const COVERAGE_TOOL_SIGNATURES = [
+  ["JaCoCo", /\bjacoco\b/i], ["Istanbul/nyc", /"nyc"|\bistanbul\b|@vitest\/coverage|coverage-v8|coverage-istanbul/i],
+  ["coverage.py", /\bpytest-cov\b/i], ["coverlet", /\bcoverlet\b/i], ["SimpleCov", /\bsimplecov\b/i],
+];
+const TEST_MANIFEST_FILE = /^(?:pom\.xml|build\.gradle(?:\.kts)?|package\.json|requirements(?:[-_.][\w.-]+)?\.txt|pyproject\.toml|setup\.(?:py|cfg)|tox\.ini|Gemfile|go\.mod|.*\.csproj|packages\.config|Directory\.Packages\.props)$/i;
+const DEPLOY_SIGNATURES = [
+  ["containers", /(?:^|\/)(?:Dockerfile(?:\.[\w.-]+)?|docker-compose(?:[.-][\w.-]+)?\.ya?ml|compose\.ya?ml|\.dockerignore)$/i],
+  ["ci", /(?:^|\/)(?:\.github\/workflows\/[^/]+\.ya?ml|\.gitlab-ci\.ya?ml|Jenkinsfile(?:\.[\w.-]+)?|azure-pipelines(?:[.-][\w.-]+)?\.ya?ml|bitbucket-pipelines\.ya?ml|\.circleci\/config\.ya?ml|\.travis\.ya?ml|appveyor\.ya?ml|buildspec(?:[.-][\w.-]+)?\.ya?ml)$/i],
+  ["iac", /(?:^|\/)(?:[^/]+\.tf|Chart\.ya?ml|kustomization\.ya?ml|serverless\.ya?ml|cloudformation[^/]*\.(?:ya?ml|json)|Vagrantfile|ansible\.cfg|playbook[^/]*\.ya?ml)$|(?:^|\/)(?:k8s|kubernetes|manifests|helm|charts|terraform)\/[^/]+\.(?:ya?ml|tf)$/i],
+  ["app_servers", /(?:^|\/)(?:WEB-INF\/web\.xml|server\.xml|context\.xml|jboss-web\.xml|weblogic\.xml|standalone[^/]*\.xml|Web\.config|appsettings(?:\.[\w-]+)?\.json|Procfile|appspec\.ya?ml)$/i],
+  ["build_scripts", /(?:^|\/)(?:build\.xml|Makefile|makefile|build\.(?:sh|bat|cmd|ps1)|deploy[^/]*\.(?:sh|bat|cmd|ps1)|release[^/]*\.(?:sh|bat|cmd|ps1)|gradlew|mvnw)$/i],
+];
+const INVENTORY_LIST_CAP = 20;
+const INVENTORY_MANIFEST_MAX_BYTES = 512 * 1024;
+const INVENTORY_FILE_LIMIT = 200000;
+
+function detectTestDeployInventory(root, includePaths, excludedSources) {
+  const frameworks = new Map();
+  const coverageTools = new Map();
+  const deploy = {};
+  for (const [group] of DEPLOY_SIGNATURES) deploy[group] = [];
+  const manifests = [];
+  let fileCount = 0;
+  function walk(dir, relDir) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        /* .github 등 CI 디렉터리는 소스 인덱싱 제외 대상과 무관하게 배포 모델 근거이므로 걷는다. */
+        if (EXCLUDED_DIRS.has(entry.name) && entry.name !== "build") continue;
+        if (fileCount > INVENTORY_FILE_LIMIT) return;
+        walk(join(dir, entry.name), rel);
+        continue;
+      }
+      fileCount += 1;
+      if (relDir && !isIncluded(rel, includePaths) && !/^\.(?:github|gitlab|circleci)\//.test(rel)) continue;
+      for (const [group, regex] of DEPLOY_SIGNATURES) {
+        if (regex.test(rel)) { deploy[group].push(rel); break; }
+      }
+      if (TEST_MANIFEST_FILE.test(entry.name)) manifests.push({ rel, full: join(dir, entry.name) });
+    }
+  }
+  walk(root, "");
+  for (const manifest of manifests.sort((a, b) => byCodeUnit(a.rel, b.rel))) {
+    let text;
+    try {
+      if (statSync(manifest.full).size > INVENTORY_MANIFEST_MAX_BYTES) continue;
+      text = readFileSync(manifest.full, "utf8");
+    } catch { continue; }
+    for (const [name, regex] of TEST_FRAMEWORK_SIGNATURES) {
+      if (regex.test(text) && !frameworks.has(name)) frameworks.set(name, manifest.rel);
+    }
+    for (const [name, regex] of COVERAGE_TOOL_SIGNATURES) {
+      if (regex.test(text) && !coverageTools.has(name)) coverageTools.set(name, manifest.rel);
+    }
+  }
+  let testFileCount = 0;
+  const testDirs = new Set();
+  for (const item of excludedSources || []) {
+    if (!/^test-/.test(item.reason)) continue;
+    testFileCount += 1;
+    const segments = item.file.split("/");
+    const idx = segments.findIndex((segment) => /^(?:test|tests|__tests__|spec|specs)$/i.test(segment));
+    if (idx >= 0) testDirs.add(segments.slice(0, idx + 1).join("/"));
+    else if (segments.length > 1) testDirs.add(segments.slice(0, -1).join("/"));
+  }
+  const cap = (list) => ({ items: list.sort(byCodeUnit).slice(0, INVENTORY_LIST_CAP), truncated: Math.max(0, list.length - INVENTORY_LIST_CAP) });
+  const deployOut = {};
+  let deployTotal = 0;
+  for (const [group, list] of Object.entries(deploy)) { deployOut[group] = cap(list); deployTotal += list.length; }
+  return {
+    test_frameworks: [...frameworks].map(([name, evidence_file]) => ({ name, evidence_file })),
+    coverage_tools: [...coverageTools].map(([name, evidence_file]) => ({ name, evidence_file })),
+    test_file_count: testFileCount,
+    test_dirs: cap([...testDirs]),
+    deploy: deployOut,
+    deploy_file_count: deployTotal,
+    manifests_scanned: manifests.length,
+    note: "파일명·매니페스트 의존성 이름만 본 인벤토리다. 테스트 실행 여부·CI 통과 여부·배포 경로의 실제 동작은 판정하지 않는다.",
+  };
+}
+
+function buildAnalysisInput(output, globalMeta, unresolved, decidableCount, decidableGroupCount, fileSizes = new Map(), testDeployInventory = null) {
   const count = (name, key) => Array.isArray(output[name]?.[key]) ? output[name][key].length : 0;
   const evidenceFiles = new Set();
   const collectFiles = (name, key) => {
@@ -2699,6 +4556,8 @@ function buildAnalysisInput(output, globalMeta, unresolved, decidableCount, deci
        * 직접 열 수밖에 없었다. */
       query_tool: "agents/lib/query-index.mjs",
       query_tool_hint: "node $CLAUDE_PLUGIN_ROOT/agents/lib/query-index.mjs summary --root <프로젝트>",
+      /* 테스트 프레임워크·테스트 위치·배포 모델(컨테이너·CI·IaC·앱서버·빌드 스크립트). 파일명·매니페스트만 본다. */
+      test_deploy_inventory: testDeployInventory,
     },
     analyzer_contract: {
       full_source_rescan: false,
@@ -2786,6 +4645,7 @@ function validateOutput(name, value) {
     ui_flow: ["_meta", "screens", "events", "datasets", "transactions"],
     client_index: ["_meta", "type", "js_count", "domain_structure", "sample_mappings", "jquery_versions"],
     data_flow: ["_meta", "chains"],
+    dispatch: ["_meta", "rules", "calls", "result_keys", "partner_links"],
   }[name] || [];
   const missing = required.filter((key) => !(key in value));
   if (missing.length) throw new Error(`${name}.json 필수 필드 누락: ${missing.join(", ")}`);
@@ -2793,8 +4653,16 @@ function validateOutput(name, value) {
 
 export function buildIndex(options) {
   const root = resolve(options.root);
-  const normalized = { ...options, root, requestedTier: options.tier || "Auto" };
-  const existingPatchPath = join(root, "_workspace", "index", "_ai_patch.json");
+  /*
+   * 갱신(incremental)은 사용자가 고른 Tier 를 바꾸지 않는다. 실측: "인덱스갱신해줘" 뒤에 Standard 로 만든
+   * 하네스의 인덱스가 Auto 재산정으로 Full 이 됐다. 지정이 없으면 기존 _meta 의 Tier 를 쓴다.
+   */
+  const unspecified = !options.tier || options.tier === "Auto"; // 명령행 기본값이 "Auto" 다
+  const keptTier = unspecified && options.mode === "incremental"
+    ? readJson(join(resolveIndexDir(root, options.indexDir), "_meta.json"), {})?.tier
+    : null;
+  const normalized = { ...options, root, requestedTier: (unspecified ? keptTier : options.tier) || "Auto" };
+  const existingPatchPath = join(resolveIndexDir(root, options.indexDir), "_ai_patch.json");
   const preservePatch = options.mode === "incremental" && existsSync(existingPatchPath);
   const config = loadConfig(root, options.config);
   const { files, excluded: excludedSources } = listFiles(root, config.include_paths, config);
@@ -2815,7 +4683,7 @@ export function buildIndex(options) {
   const coverage = buildAdapterCoverage(facts, unsupportedFiles);
   normalized.tier = normalized.requestedTier === "Auto" ? complexity.recommended_tier : normalized.requestedTier;
   const { output, globalMeta, unresolved } = aggregate(facts, normalized, config, generatedAt, files.length, latestMtime, complexity, coverage, excludedSources, files);
-  const indexDir = join(root, "_workspace", "index");
+  const indexDir = resolveIndexDir(root, options.indexDir);
   mkdirSync(indexDir, { recursive: true });
   const stalePatch = join(indexDir, "_ai_patch.json");
   /*
@@ -2836,7 +4704,7 @@ export function buildIndex(options) {
       globalMeta.ai_enrichment = { applied_at: generatedAt, applied: 0, rejected: 0, error: error.message, patch: slash(relative(root, stalePatch)) };
     }
   }
-  const managed = new Set(["symbols", "call_graph", "sql_usage", "transactions", "external_io", "env_branches", "schema", "api_contract", "dead_code", "ui_flow", "client_index", "data_flow"]);
+  const managed = new Set(["symbols", "call_graph", "sql_usage", "transactions", "external_io", "env_branches", "schema", "api_contract", "dead_code", "ui_flow", "client_index", "data_flow", "glossary", "ui_columns", "dispatch"]);
   for (const name of managed) {
     const path = join(indexDir, `${name}.json`);
     /*
@@ -2909,7 +4777,7 @@ export function buildIndex(options) {
     return { ...item, candidates: candidates.slice(0, MAX_UNRESOLVED_CANDIDATES), candidates_truncated: candidates.length - MAX_UNRESOLVED_CANDIDATES, group_id };
   });
   atomicJson(join(indexDir, "_meta.json"), globalMeta);
-  atomicJson(join(indexDir, "_analysis_input.json"), buildAnalysisInput(output, globalMeta, unresolved, decidableCount, decidableGroupCount, new Map(files.map((item) => [item.rel, item.stats.size]))));
+  atomicJson(join(indexDir, "_analysis_input.json"), buildAnalysisInput(output, globalMeta, unresolved, decidableCount, decidableGroupCount, new Map(files.map((item) => [item.rel, item.stats.size])), detectTestDeployInventory(root, config.include_paths, excludedSources)));
   writeFileSync(join(indexDir, "_unresolved.jsonl"), cappedUnresolved.map((item) => JSON.stringify(item)).join("\n") + (unresolved.length ? "\n" : ""), "utf8");
   atomicJson(join(indexDir, "_unresolved_groups.json"), {
     _meta: { generated_at: generatedAt, generator: "deterministic-indexer", group_count: groups.length, decidable_raw_count: decidableCount, total_occurrences: decidableItems.length },
@@ -3170,10 +5038,10 @@ function mergeAiPatchOutput(output, patch, groups, appliedAt, changed = new Set(
   return result;
 }
 
-export function applyAiPatch(rootArg, patchArg) {
+export function applyAiPatch(rootArg, patchArg, indexDirArg) {
   const root = resolve(rootArg);
   const patchPath = isAbsolute(patchArg) ? patchArg : join(root, patchArg);
-  const indexDir = join(root, "_workspace", "index");
+  const indexDir = resolveIndexDir(root, indexDirArg);
   const patch = readJson(patchPath);
   const names = ["call_graph", "api_contract", "sql_usage", "external_io", "client_index", "data_flow", "dead_code"];
   const output = {};
@@ -3212,8 +5080,9 @@ export function applyAiPatch(rootArg, patchArg) {
 function printHelp() {
   process.stdout.write(`AX-Harness deterministic indexer\n\n` +
     `node scripts/build-index.mjs --root <project> --check-stale   # 재인덱싱 필요 여부만 판정(exit 0=최신, 1=필요)\n` +
-    `node scripts/build-index.mjs --root <project> [--mode init|incremental|feature-scoped] [--tier Lite|Standard|Full] [--config <json>]\n` +
-    `node scripts/build-index.mjs --root <project> --apply-ai-patch _workspace/index/_ai_patch.json\n`);
+    `node scripts/build-index.mjs --root <project> [--mode init|incremental|feature-scoped] [--tier Standard|Full] [--config <json>]\n` +
+    `node scripts/build-index.mjs --root <project> --apply-ai-patch _workspace/index/_ai_patch.json\n` +
+    `\n  --index-dir <dir>   인덱스 출력/조회 위치 (기본 <root>/_workspace/index)\n`);
 }
 
 function main() {
@@ -3223,11 +5092,11 @@ function main() {
     if (options.checkStale) {
       /* 팀원이 공유 하네스를 받은 뒤 "인덱싱을 다시 해야 하나"를 LLM 없이 묻는 경로.
        * exit 0 = 그대로 써도 됨, exit 1 = 재인덱싱 필요. */
-      const state = indexStaleness(options.root);
+      const state = indexStaleness(options.root, options.indexDir);
       process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
       return state.stale ? 1 : 0;
     }
-    const result = options.applyAiPatch ? applyAiPatch(options.root, options.applyAiPatch) : buildIndex(options);
+    const result = options.applyAiPatch ? applyAiPatch(options.root, options.applyAiPatch, options.indexDir) : buildIndex(options);
     if (!options.quiet) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     /*
      * 조용한 실패 금지.

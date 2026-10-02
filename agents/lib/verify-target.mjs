@@ -18,6 +18,7 @@
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, relative, dirname, sep } from "node:path";
+import { pythonBin } from "./python-bin.mjs";
 import { spawnSync } from "node:child_process";
 
 const FAIL_LINE_LIMIT = 15; // 명령당 반환할 실패 라인 상한
@@ -120,11 +121,43 @@ function detectCommands(root, target) {
   if (existsSync(join(root, ".flake8")) || existsSync(join(root, "setup.cfg"))) {
     add("lint", "flake8", ".flake8/setup.cfg");
   }
+  /*
+   * Python 테스트 — pytest 설정이 있거나 conftest.py·tests/test_*.py 가 있으면 돌린다.
+   * 예전에는 린트·타입체크만 봐서 Python 프로젝트의 테스트를 한 번도 돌리지 않았다.
+   * 인터프리터 이름은 pythonBin() 으로 정한다(윈도우는 python, 리눅스는 python3 만 있는 경우가 흔하다).
+   */
+  const pytestSource = existsSync(join(root, "pytest.ini")) ? "pytest.ini"
+    : hasPyproject && /\[tool\.pytest/.test(readFileSync(join(root, "pyproject.toml"), "utf8")) ? "pyproject.toml:tool.pytest"
+    : existsSync(join(root, "setup.cfg")) && /\[tool:pytest\]/.test(readFileSync(join(root, "setup.cfg"), "utf8")) ? "setup.cfg:tool:pytest"
+    : existsSync(join(root, "tox.ini")) && /\[pytest\]/.test(readFileSync(join(root, "tox.ini"), "utf8")) ? "tox.ini:pytest"
+    : existsSync(join(root, "conftest.py")) ? "conftest.py"
+    : existsSync(join(root, "tests")) && readdirSync(join(root, "tests")).some((name) => /^test_.*\.py$/.test(name)) ? "tests/test_*.py"
+    : null;
+  if (pytestSource) add("test", `${pythonBin() ?? "python"} -m pytest -q`, pytestSource);
 
   // Java — 빌드 도구 (테스트/컴파일)
   if (existsSync(join(root, "pom.xml"))) add("build", "mvn -q -DskipTests=false test", "pom.xml");
   else if (existsSync(join(root, "build.gradle")) || existsSync(join(root, "build.gradle.kts")))
     add("build", "gradle test", "build.gradle");
+  /*
+   * Ant — 레거시 Java 웹(Struts 등)에 흔하다. 실측: eduLms 가 build.xml 뿐이라 검증 명령이 0개였다.
+   * test 타깃이 있으면 test, 없으면 compile·build 계열 타깃, 그것도 없으면 기본 타깃을 돌린다.
+   */
+  else if (existsSync(join(root, "build.xml"))) {
+    const antXml = readFileSync(join(root, "build.xml"), "utf8");
+    const targets = [...antXml.matchAll(/<target\b[^>]*\bname\s*=\s*["']([^"']+)["']/g)].map((m) => m[1]);
+    const testTarget = targets.find((name) => /^(test|junit|unit-?test)s?$/i.test(name));
+    const buildTarget = targets.find((name) => /^(compile|build|dist|war|jar)$/i.test(name));
+    if (testTarget) add("test", `ant ${testTarget}`, `build.xml:target ${testTarget}`);
+    else if (buildTarget) add("build", `ant ${buildTarget}`, `build.xml:target ${buildTarget}`);
+    else add("build", "ant", "build.xml(기본 타깃)");
+  }
+
+  // Go — go.mod 가 있으면 vet(정적 검사)과 test
+  if (existsSync(join(root, "go.mod"))) {
+    add("lint", "go vet ./...", "go.mod");
+    add("test", "go test ./...", "go.mod");
+  }
 
   // Makefile — 관례적 타깃
   if (existsSync(join(root, "Makefile"))) {
@@ -204,8 +237,40 @@ function extractFailLines(output, limit) {
   return { fail_lines: picked.slice(0, limit), truncated };
 }
 
+/*
+ * 명령의 실행 파일이 이 환경에 있는가.
+ *
+ * 실측(2026-09-26): Ant 가 없는 PC 에서 `ant compile` 이 exit 1 과 "'ant'은(는) 내부 또는 외부 명령… 아닙니다" 로
+ * 끝났고, change-safety 는 이를 "검증 미실행(UNVERIFIED)" 으로 읽어 코드와 무관하게 HOLD 했다. 메시지는
+ * 셸·로캘마다 달라 글로 판단하면 흔들린다 — 실행 전에 PATH 에서 찾아 본다.
+ */
+const SHELL_BUILTINS = new Set(["cd", "set", "call", "pushd", "popd", "echo", "export", "source", ".", "env", "setlocal", "if", "for", "start"]);
+
+export function commandAvailable(root, cmd) {
+  const quoted = cmd.trim().match(/^"([^"]+)"/);
+  const token = quoted ? quoted[1] : (cmd.trim().match(/^(\S+)/) || [])[1] || "";
+  if (!token) return { ok: false, tool: "" };
+  /*
+   * 셸 내장 명령·환경 변수 대입으로 시작하면 PATH 에 실행 파일이 없는 게 정상이다. 실행해 본다.
+   * 안 그러면 `cd sub && npm test` 가 "도구 없음" 이 되어 실제로 실패하는 테스트가 가려진다(리뷰 실측).
+   */
+  if (SHELL_BUILTINS.has(token.toLowerCase()) || /^[A-Za-z_][\w]*=/.test(token)) return { ok: true, tool: token };
+  if (/[\\/]/.test(token)) {
+    const path = resolve(root, token);
+    const exts = process.platform === "win32" ? ["", ".cmd", ".bat", ".exe"] : [""];
+    return { ok: exts.some((e) => existsSync(path + e)), tool: token };
+  }
+  const exts = process.platform === "win32" ? ["", ...(process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").map((e) => e.toLowerCase())] : [""];
+  const dirs = [root, ...(process.env.PATH || "").split(process.platform === "win32" ? ";" : ":")].filter(Boolean);
+  // 윈도 셸은 현재 폴더를 먼저 찾는다(gradlew.bat 등). 유닉스는 ./ 없이 현재 폴더를 찾지 않는다.
+  const search = process.platform === "win32" ? dirs : dirs.slice(1);
+  return { ok: search.some((d) => exts.some((e) => existsSync(join(d, token + e)))), tool: token };
+}
+
 /* 명령 하나를 실행하고 exit code와 실패 라인만 캡처한다. */
 function runCommand(root, cmd, limit) {
+  const available = commandAvailable(root, cmd);
+  if (!available.ok) return { cmd, exit: null, unavailable: true, missing_tool: available.tool };
   const result = spawnSync(cmd, { cwd: root, shell: true, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
   const exit = result.status == null ? (result.error ? 127 : 1) : result.status;
   const combined = `${result.stdout || ""}\n${result.stderr || ""}`;
@@ -230,7 +295,7 @@ function main() {
       target: args.target || null,
       detected: commands,
       count: commands.length,
-      note: commands.length === 0 ? "검증 명령을 찾지 못했습니다 — 수동 검증 시나리오가 필요합니다." : null,
+      note: commands.length === 0 ? "검증 명령을 찾지 못했습니다 — 보고에 '검증 수단 없음'으로 밝히고, 위험 변경이 아니면 원문 확인으로 진행합니다." : null,
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     process.exitCode = 0;
@@ -242,15 +307,17 @@ function main() {
     // detect가 내는 명령은 단일 명령이다. 여러 명령이 필요하면 run을 여러 번 호출한다
     // (여기서 &&·; 로 쪼개면 따옴표 안 인자까지 잘려 명령이 깨진다).
     const commands = [runCommand(args.root, args.cmd, args.limit)];
-    const overall = commands.every((c) => c.exit === 0) ? "pass" : "fail";
+    const overall = commands.every((c) => c.unavailable) ? "unavailable" : commands.every((c) => c.exit === 0 || c.unavailable) ? "pass" : "fail";
     const payload = {
       command: "run",
       root: args.root,
       commands,
       overall,
+      ...(overall === "unavailable" ? { note: `${commands.map((c) => c.missing_tool).join(", ")} 이(가) 이 환경에 없어 실행하지 않았습니다. 코드 결함이 아니므로 '검증 수단 없음(환경)'으로 보고하고 정적 대조로 진행합니다.` } : {}),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-    process.exitCode = overall === "pass" ? 0 : 2;
+    // 3 = 도구 없음. 실패(2)와 구분한다.
+    process.exitCode = overall === "pass" ? 0 : overall === "unavailable" ? 3 : 2;
     return;
   }
 

@@ -64,6 +64,29 @@ export async function test(register, assert) {
     }
   });
 
+  /* 실측: eduLms(Struts)는 build.xml 뿐이라 검증 명령이 0개였다. Python 은 테스트를 한 번도 안 돌렸다. */
+  register("detect는 Ant 타깃·pytest 설정·go.mod 를 잡는다", () => {
+    const roots = [];
+    const make = (files) => {
+      const root = mkdtempSync(join(tmpdir(), "vt-more-"));
+      roots.push(root);
+      for (const [rel, body] of Object.entries(files)) write(root, rel, body);
+      return JSON.parse(runCli(["detect", "--root", root]).stdout).detected.map((c) => c.cmd);
+    };
+    try {
+      assert.ok(make({ "build.xml": '<project><target name="compile"/><target name="test"/></project>' }).includes("ant test"), "Ant test 타깃");
+      assert.ok(make({ "build.xml": '<project default="war"><target name="compile"/></project>' }).includes("ant compile"), "Ant test 없으면 compile");
+      assert.ok(make({ "build.xml": "<project/>" }).includes("ant"), "Ant 타깃이 없으면 기본 타깃");
+      const py = make({ "pyproject.toml": "[tool.pytest.ini_options]\naddopts = '-q'\n" });
+      assert.ok(py.some((cmd) => / -m pytest -q$/.test(cmd)), JSON.stringify(py));
+      assert.ok(make({ "tests/test_order.py": "def test_x():\n    assert True\n" }).some((cmd) => /pytest/.test(cmd)), "tests/test_*.py 만 있어도 pytest");
+      const go = make({ "go.mod": "module example.com/x\n" });
+      assert.ok(go.includes("go vet ./...") && go.includes("go test ./..."), JSON.stringify(go));
+    } finally {
+      for (const root of roots) rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   register("detect는 검증 명령이 없으면 count 0과 안내 note를 준다", () => {
     const root = mkdtempSync(join(tmpdir(), "vt-empty-"));
     try {
@@ -84,6 +107,33 @@ export async function test(register, assert) {
       assert.equal(out.commands[0].exit, 0, res.stdout);
       assert.equal(out.commands[0].fail_lines, undefined, "성공은 실패 라인 없음");
       assert.equal(res.status, 0, "성공 exit 0");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /* 실측: Ant 없는 PC 의 `ant compile` 실패를 검증 미실행으로 읽어 코드와 무관하게 HOLD 했다. */
+  register("run은 실행 파일이 없는 명령을 실패가 아니라 unavailable·exit 3으로 구분한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "vt-missing-"));
+    try {
+      const res = runCli(["run", "--root", root, "--cmd", "axnavi-no-such-tool-xyz compile"]);
+      const out = JSON.parse(res.stdout);
+      assert.equal(out.overall, "unavailable", res.stdout);
+      assert.equal(out.commands[0].missing_tool, "axnavi-no-such-tool-xyz", res.stdout);
+      assert.ok(/검증 수단 없음/.test(out.note), res.stdout);
+      assert.equal(res.status, 3, "도구 없음 exit 3");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("run은 셸 내장 명령으로 시작하는 명령을 도구 없음으로 가리지 않고 실제로 실행한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "vt-builtin-"));
+    try {
+      const res = runCli(["run", "--root", root, "--cmd", 'cd . && node -e "process.exit(4)"']);
+      const out = JSON.parse(res.stdout);
+      assert.equal(out.overall, "fail", "실패하는 명령이 '도구 없음'으로 가려졌다 " + res.stdout);
+      assert.equal(out.commands[0].exit, 4, res.stdout);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

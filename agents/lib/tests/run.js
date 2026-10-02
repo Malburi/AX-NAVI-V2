@@ -10,6 +10,9 @@ import { test as registerQueryIndexTests } from "./query-index.test.mjs";
 import { test as registerPortabilityTests } from "./portability.test.mjs";
 import { test as registerVerifyTargetTests } from "./verify-target.test.mjs";
 import { test as registerAnalysisWikiTests } from "./analysis-wiki.test.mjs";
+import { test as registerSiteTests } from "./site.test.mjs";
+import { test as registerCoverageReportTests } from "./coverage-report.test.mjs";
+import { test as registerDispatchTests } from "./dispatch.test.mjs";
 
 const tests = [];
 function test(name, fn) {
@@ -26,6 +29,7 @@ const assert = {
 };
 
 await registerIndexerTests(test, assert);
+await registerDispatchTests(test, assert);
 await registerBudgetTests(test, assert);
 await registerValidateHarnessTests(test, assert);
 await registerPatternProfileTests(test, assert);
@@ -36,6 +40,8 @@ await registerQueryIndexTests(test, assert);
 await registerPortabilityTests(test, assert);
 await registerVerifyTargetTests(test, assert);
 await registerAnalysisWikiTests(test, assert);
+await registerSiteTests(test, assert);
+await registerCoverageReportTests(test, assert);
 
 let passed = 0,
   failed = 0;
