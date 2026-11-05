@@ -96,6 +96,7 @@ SQL 레이어에 도달하면 `sql --file [DAO 파일]` 또는 `sql --id [SQL ID
 - **MyBatis/iBatis**: Mapper XML `select`/`update`/`insert`/`delete` ID + 실제 SQL 요약
 - **JPA**: 메서드명 + JPQL/네이티브 쿼리 (있으면)
 - **직접 JDBC**: prepareStatement 쿼리 문자열 추출
+- **저장 프로시저**(`{call PKG.PROC}`): `schema.json` 의 `procedures[]`(읽고 쓰는 테이블·`calls`·`scheduled_by`)로 이어 간다. 인덱스에 본문이 없고(`implemented: false`·정의 없는 프로시저) AX Navi DB 도구가 있으면 `db_source`(`PKG.PROC` — 그 멤버 구간만)로 본문을 읽어 흐름을 잇는다. 도구도 없으면 "소스 없음 — 이 지점에서 추적이 끊긴다"고 명시한다.
 - 영향 테이블 목록 (`TBL_ORDER`, `TBL_PAYMENT` 등)
 - 트랜잭션 범위 — `transaction --id [Service 메서드]`로 marker·propagation·isolation 확인
 

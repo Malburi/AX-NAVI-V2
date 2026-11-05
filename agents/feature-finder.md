@@ -65,6 +65,7 @@ node "${CLAUDE_PLUGIN_ROOT}/agents/lib/query-index.mjs" <명령> --root "[프로
 MyBatis XML / SQL 파일에서:
 - SQL ID에 키워드 포함 여부
 - 관련 테이블명 grep (키워드 → 예상 테이블명 변환)
+- 한글 업무명으로 테이블을 찾을 때는 `schema.json` 의 테이블·컬럼 `comment`(DB 사전을 받은 인덱스)를 먼저 본다. AX Navi DB 도구가 있으면 `db_objects`(`comment`: 키워드)로 DB 코멘트를 직접 검색한다 — 테이블명 추측보다 정확하다.
 
 ---
 
