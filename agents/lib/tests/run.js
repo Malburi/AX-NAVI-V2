@@ -14,6 +14,7 @@ import { test as registerSiteTests } from "./site.test.mjs";
 import { test as registerCoverageReportTests } from "./coverage-report.test.mjs";
 import { test as registerDispatchTests, testLargeFile as registerLargeFileTests } from "./dispatch.test.mjs";
 import { test as registerWriteGuardTests } from "./write-guard.test.mjs";
+import { test as registerReportDepthTests } from "./report-depth.test.mjs";
 
 const tests = [];
 function test(name, fn) {
@@ -45,6 +46,7 @@ await registerAnalysisWikiTests(test, assert);
 await registerSiteTests(test, assert);
 await registerCoverageReportTests(test, assert);
 await registerWriteGuardTests(test, assert);
+await registerReportDepthTests(test, assert);
 
 let passed = 0,
   failed = 0;
