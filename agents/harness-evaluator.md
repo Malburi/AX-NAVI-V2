@@ -96,7 +96,7 @@ tools: Read, Grep, Glob, Bash, Write
 - domain-expert에 도메인 특화 내용 없음 (공통 내용만): -7점
 - analyzer 보완 권장 항목 미반영: -3점
 - spec 목표/제약 미반영: -5점 (`00_spec_report.md` 없으면 이 항목 검증·감점 없음)
-- **분석 리포트가 얕음 (깊이 게이트 FAIL): -10점.** `_workspace/report_depth.json`을 읽는다(오케스트레이터가 `report-depth.mjs`로 만든 결정론적 측정). `verdict`가 `FAIL`이면 감점한다 — 이 파일이 없으면 이 항목은 검증하지 않는다. 정확성 차원은 "인용한 경로가 있는가"만 보므로 "미수행"·한 줄짜리 절로 채운 리포트도 통과시켜 왔다(실측: 소스 2,737파일 시스템에서 서술 3.6KB·`파일:줄` 근거 0건·필수 절 5개 전부 비어 있는데 84점 PASS). 이 항목이 그 구멍을 막는다.
+- **분석 리포트가 얕음 (깊이 게이트 FAIL): -10점.** `_workspace/report_depth.json`을 읽는다(오케스트레이터가 `report-depth.mjs`로 만든 결정론적 측정). `verdict`가 `FAIL`이면 감점한다. **사용자가 심층 패스를 거절해 `declined: true`이면 감점은 -5점으로 줄인다**(사용자의 결정이므로 총점 상한도 없다 — 아래 참조). `WARN`(프로젝트가 `small_project_files` 옵트인으로 낮춘 경우 포함)·`SKIPPED`이거나 이 파일이 없으면 이 항목은 검증·감점하지 않는다. 정확성 차원은 "인용한 경로가 있는가"만 보므로 "미수행"·한 줄짜리 절로 채운 리포트도 통과시켜 왔다(실측: 소스 2,737파일 시스템에서 서술 3.6KB·`파일:줄` 근거 0건·필수 절 5개 전부 비어 있는데 84점 PASS). 이 항목이 그 구멍을 막는다.
 
 ---
 
@@ -112,7 +112,9 @@ tools: Read, Grep, Glob, Bash, Write
 | 60~79 | **PARTIAL** | 특정 차원 타겟 재생성 권고. fix_targets 반환 |
 | 0~59 | **RETRY** | 주요 에이전트 재실행 필요. fix_targets 반환 |
 
-**총점 상한:** `_workspace/report_depth.json`의 `verdict`가 `FAIL`이면 다른 차원이 만점이어도 **총점은 79를 넘길 수 없다**(PASS 불가). 분석이 얕은 하네스는 `CLAUDE.md`·`domain-expert.md`도 얕은 재료로 만들어지므로 "사용 가능"이라고 보고하면 안 된다. `WARN`은 상한 없이 개선 권고에만 적는다.
+**총점 상한:** `_workspace/report_depth.json`의 `verdict`가 `FAIL`이고 `declined`가 아니면 다른 차원이 만점이어도 **총점은 79를 넘길 수 없다**(PASS 불가). 분석이 얕은 하네스는 `CLAUDE.md`·`domain-expert.md`도 얕은 재료로 만들어지므로 "사용 가능"이라고 보고하면 안 된다.
+- `declined: true`(사용자가 거절): **상한 없음, -5점만.** 대신 Eval 리포트 맨 위에 "분석 깊이 미달 — 사용자가 심층 패스를 거절함"을 한 줄 적는다(숨기지 않는다). 이 경우 아래 `fix_targets`에 심층 분석 행을 **만들지 않는다** — 이미 사용자가 거절했는데 Phase 4 가 같은 일을 다시 시키면 안 된다.
+- `WARN`·`SKIPPED`: 상한 없이 개선 권고에만 적는다.
 
 ---
 
@@ -127,7 +129,7 @@ PARTIAL/RETRY일 때 점수 낮은 차원 순으로 재생성 대상 나열:
 | 정확도 (스킬 본문 수정) | `writer` | 불일치를 참조하는 writer 작성 파일 | "재탐지 결과에 맞춰 스킬을 수정하라: [목록]" |
 | 실행가능성 | `writer` | 트리거 부족 스킬·인덱스 불일치 파일 | "트리거 문구 보강 + 인덱스 참조 수정" |
 | 컨텍스트 품질 | `writer` | claude_md_fields.json (domain-expert.md는 writer 수정 대상 아님) | "요청 흐름 재작성 + 주의사항 필드 보강" |
-| 분석 서술 깊이 (깊이 게이트 FAIL) | `analyzer` | `_workspace/deep/` (mode: deep, 영역별) | "`area-split.mjs`로 나눈 영역마다 소스를 직접 읽어 심층 분석을 쓰고 `merge-deep.mjs`로 합쳐라: [report_depth.json의 비어 있는 필수 절 목록]" |
+| 분석 서술 깊이 (깊이 게이트 `FAIL` 이고 `declined` 가 아닐 때만) | `analyzer` | `_workspace/deep/` (mode: deep, 영역별) | "`area-split.mjs`로 나눈 영역마다 소스를 직접 읽어 심층 분석을 쓰고 `merge-deep.mjs`로 합쳐라: [report_depth.json의 비어 있는 필수 절 목록]" |
 
 한 행에 에이전트 1개만 적는다 — 정확도처럼 두 에이전트가 필요하면 위처럼 행을 나눈다 (analyzer 행이 writer 행보다 우선순위 위).
 

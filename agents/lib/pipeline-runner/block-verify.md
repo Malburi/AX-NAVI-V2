@@ -39,7 +39,8 @@ node "[plugin_root]/agents/lib/report-depth.mjs" --root "[root]" --tier "[tier]"
 ```
 
 결과는 `_workspace/report_depth.json`에 남는다. **exit 1(FAIL)은 스크립트 실패가 아니라 "얕다"는 판정이다** — 파일은 정상으로 쓰이고 이 블록은 재시도하지 않는다. exit 2는 리포트가 없다는 뜻이다(WARN 후 계속).
-`remedy.action`이 `deep_pass`이면 처방은 오케스트레이터의 몫이다 — 이 블록이 영역 분할·심층 분석을 직접 하지 않는다(그건 LLM 호출이라 pipeline-runner 범위 밖).
+`remedy.action`이 `deep_pass`이면 처방은 오케스트레이터의 몫이다 — 이 블록이 영역 분할·심층 분석을 직접 하지 않는다(그건 LLM 호출이라 pipeline-runner 범위 밖). 반환에 처방의 `areas`·`estimated_tokens`·`confirm_required`를 그대로 옮긴다(오케스트레이터가 확인 여부를 이 값으로 정한다).
+**FAIL 만이 아니다:** `indexer-config.json`의 `depth_gate.enabled: false`이면 `SKIPPED`이고, 프로젝트가 `small_project_files`(옵트인)를 켰다면 `downgraded_to_warn: true`로 FAIL 이 WARN 이 되고 처방이 없다 — 그대로 반환하고 임의로 심층 패스를 권하지 않는다. 규모만으로는 낮추지 않는다(작은 프로젝트의 처방은 영역 1개, `confirm_required: false`).
 
 ## 반환 형식
 
@@ -53,7 +54,8 @@ mechanical: index_integrity_fail=[true|false] index_spotcheck_fail=[true|false]
 mechanical_gate_warns: [ "analyzer.md Step 8 참고" 또는 "generated_at" 문구를 포함한 warn만 원문 그대로, 없으면 "없음" ]
 schema: failures=[N] plugin_contract_failures=[N] | skipped(node 없음)
 schema_fail_messages: [failures > 0일 때만, FAIL 메시지 원문 최대 10줄]
-depth: PASS | WARN | FAIL | skipped(node 없음·리포트 없음) (서술 [N]B/하한 [N]B, 근거 [N]건/하한 [N], 빈 필수 절: [목록 또는 없음])
+depth: PASS | WARN | FAIL | SKIPPED | skipped(node 없음·리포트 없음) (서술 [N]B/하한 [N]B, 근거 [N]건/하한 [N], 빈 필수 절: [목록 또는 없음]) [소규모로 낮춤: yes|no]
+depth_remedy: [FAIL 일 때만 — 영역 [N]개, 견적 [N]K 토큰, 확인필요=[true|false]]
 WARN: [없으면 "없음"]
 ```
 
