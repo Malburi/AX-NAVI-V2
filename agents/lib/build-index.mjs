@@ -37,6 +37,7 @@ import {
 } from "./adapters/registry.mjs";
 import { extractNexacro } from "./adapters/nexacro.mjs";
 import { extractDispatchCalls, extractResultKeys, inferDispatchRules, resolveCall, selectColumns } from "./index/dispatch.mjs";
+import { detectSqlDialect, unwrapMysqlConditionalComments } from "./index/sql_dialect.mjs";
 
 export const INDEXER_VERSION = "2.0.0"; // 문자열 디스패치(worker·action → 빈 메서드)와 결과를 위치로 읽는 화면을 잇고, SELECT 컬럼 순서를 남긴다.
 
@@ -178,6 +179,8 @@ function testReason(rel, config) {
 }
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
+/* db_dump_paths 안의 파일에만 적용한다. 정규식 추출이 선형이 아닌 구간이 있어 무한정 늘리지 않는다 — 더 크면 객체별로 나눠 받는다. */
+const DUMP_MAX_FILE_BYTES = 32 * 1024 * 1024;
 /* 한 미해결 항목에 후보를 무한정 적지 않는다. 후보가 수백 개면 그 자체가 "판정 불가"라는 뜻이고,
  * 실측 레거시 프로젝트에서 이 목록이 _unresolved.jsonl을 169MB까지 부풀렸다. */
 const MAX_UNRESOLVED_CANDIDATES = 20;
@@ -343,10 +346,13 @@ function isExcludedDir(parent, name) {
 function listFiles(root, includePaths = [""], config = null) {
   const output = [];
   const excluded = [];
+  const dumpPaths = config?.db_dump_paths || [];
+  /* 덤프 폴더 안(또는 그 폴더 자체)인지. build·dist·test 같은 이름의 폴더에 덤프를 둬도 건너뛰지 않게 한다. */
+  const inDump = (rel) => dumpPaths.some((scope) => rel === scope || rel.startsWith(`${scope}/`));
   function walk(dir, relDir = "") {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (isExcludedDir(dir, entry.name)) continue;
+        if (isExcludedDir(dir, entry.name) && !inDump(slash(join(relDir, entry.name)))) continue;
         if (relDir === "plugins" && entry.name === "AX-Harness") continue;
         walk(join(dir, entry.name), join(relDir, entry.name));
         continue;
@@ -355,10 +361,15 @@ function listFiles(root, includePaths = [""], config = null) {
       const ext = extname(entry.name).toLowerCase();
       if (!SOURCE_EXTENSIONS.has(ext) && !MANIFEST_FILES.has(entry.name)) continue;
       const rel = slash(relative(root, full));
-      if (!isIncluded(rel, includePaths)) continue;
+      const dump = inDump(rel) || DB_SOURCE_EXTENSIONS.has(ext);
+      if (!dump && !isIncluded(rel, includePaths)) continue;
       const stats = statSync(full);
-      if (stats.size > MAX_FILE_BYTES) continue;
-      const reason = vendorReason(rel, full, stats.size, ext, config) || testReason(rel, config);
+      if (stats.size > (dump ? DUMP_MAX_FILE_BYTES : MAX_FILE_BYTES)) {
+        // 조용히 빠지면 "왜 이 파일이 인덱스에 없지"를 추적할 수 없다(큰 DB 덤프 한 파일이 통째로 사라지는 사고를 막는다).
+        excluded.push({ file: rel, reason: "too-large", bytes: stats.size });
+        continue;
+      }
+      const reason = dump ? null : (vendorReason(rel, full, stats.size, ext, config) || testReason(rel, config));
       if (reason) { excluded.push({ file: rel, reason, bytes: stats.size }); continue; }
       output.push({ full, rel, stats });
     }
@@ -471,6 +482,16 @@ function loadConfig(root, configArg) {
      * 받는 config가 바로 이 객체라 여기 없으면 두 함수 모두 항상 undefined만 본다.
      */
     vendor_exclude: config.vendor_exclude, test_exclude: config.test_exclude,
+    /*
+     * DB 덤프(DDL·패키지·프로시저 소스)가 든 폴더. 여기 있는 파일은 include_paths·벤더·테스트 제외와 무관하게 읽고,
+     * 한 파일에 객체가 몰린 덤프를 위해 크기 상한도 넓힌다(DUMP_MAX_FILE_BYTES). 루트 안의 상대경로만 받는다.
+     * 예: "db_dump_paths": ["db/dump"]
+     */
+    db_dump_paths: Array.isArray(config.db_dump_paths)
+      ? config.db_dump_paths
+        .map((item) => slash(String(item).trim().replace(/^\.\//, "").replace(/\/$/, "")))
+        .filter((item) => item && item !== "." && item !== ".." && !item.startsWith("../") && !isAbsolute(item))
+      : [],
     /*
      * 문자열 디스패치 규칙. 화면이 `/TransData.do?worker=빈&action=메서드` 처럼 부르는 구조는 호출 모양에서
      * 대부분 추론하지만(inferDispatchRules), 추론이 못 하는 프로젝트를 위해 직접 적을 수 있게 둔다.
@@ -597,7 +618,14 @@ function lineOrdered(methods) {
  * `//`를 주석으로 오인해 뒤따르는 코드를 지운다.
  */
 const PLSQL_EXTENSIONS = new Set(ADAPTERS.find((item) => item.id === "plsql").extensions);
-const SQL_COMMENT_EXTENSIONS = new Set([".sql", ...PLSQL_EXTENSIONS]);
+/* DB 덤프(DBMS_METADATA·SQL Developer 내보내기)가 .ddl 로 떨어지는 경우가 있어 .sql 과 같이 DDL 로 읽는다. */
+const DDL_EXTENSIONS = new Set([".sql", ".ddl"]);
+/*
+ * 오라클 DB 소스로만 쓰이는 확장자. 설정(db_dump_paths) 없이도 덤프로 취급해 벤더·테스트 제외와 크기 상한을 풀어 준다.
+ * `.sql`은 마이그레이션·테스트 스크립트일 수도 있어 넣지 않는다 — 그건 db_dump_paths 로 폴더를 지정할 때만 푼다.
+ */
+const DB_SOURCE_EXTENSIONS = new Set([".ddl", ...PLSQL_EXTENSIONS]);
+const SQL_COMMENT_EXTENSIONS = new Set([...DDL_EXTENSIONS, ...PLSQL_EXTENSIONS]);
 
 /* PowerScript는 `//` 주석을 쓰지만 문자열 이스케이프가 `~`다(`"~"따옴표~""`). `\`는 경로 문자다. */
 const PB_EXTENSIONS = new Set(ADAPTERS.find((item) => item.id === "powerbuilder").extensions);
@@ -843,8 +871,30 @@ const PLSQL_CALL_PAREN = new RegExp(String.raw`\b${PLSQL_CALL_PART}${PLSQL_CALL_
 const PLSQL_CALL_BARE = new RegExp(String.raw`(?<=(?:^|;|\b(?:begin|then|else|loop))\s*)\b${PLSQL_CALL_PART}${PLSQL_CALL_TAIL}\s*;`, "gim");
 const PLSQL_CALL_SKIP = new Set(["IF", "ELSIF", "WHILE", "FOR", "IN", "AND", "OR", "NOT", "VALUES", "INTO", "RETURN", "WHEN", "END", "NULL", "COMMIT", "ROLLBACK", "RAISE", "EXIT", "CONTINUE", "BEGIN", "EXCEPTION", "EXISTS", "PROCEDURE", "FUNCTION"]);
 
+/*
+ * `.sql` 안의 DB 루틴(프로시저·함수·트리거)이 어느 방언인가: "oracle" | "mssql" | "mysql" | "postgresql" | null(루틴 없음).
+ * 예전에는 `.sql`에 `CREATE PROCEDURE`가 있으면 DB 종류와 무관하게 전부 오라클 PL/SQL 파서로 보냈다. T-SQL·MySQL·PL/pgSQL 은
+ * 그 파서로 읽으면 이름만 잡히고 본문 해석이 빗나가므로, 내용으로 방언을 가려 알맞은 추출기로 보낸다.
+ * 방언을 가릴 수 없으면 예전 경로(오라클)를 그대로 탄다 — 이미 동작하던 입력을 바꾸지 않기 위해서다.
+ */
+const SQL_ROUTINE_DETECT = /\bcreate\s+(?:or\s+(?:replace|alter)\s+)?(?:definer\s*=\s*\S+\s+)?(?:(?:non)?editionable\s+)?(?:package|procedure|proc|function|trigger)\b/i;
+const FOREIGN_ROUTINE_DIALECTS = new Set(["mssql", "mysql", "postgresql"]);
+const ROUTINE_KIND_CACHE = { clean: null, ext: null, value: null };
+function sqlRoutineKind(ext, clean) {
+  if (PLSQL_EXTENSIONS.has(ext)) return "oracle";
+  if (ext !== ".sql") return null;
+  /* 같은 파일을 심볼 추출과 SQL 추출이 연달아 묻는다 — 문자열 동일성으로 한 번만 가린다. */
+  if (ROUTINE_KIND_CACHE.clean === clean && ROUTINE_KIND_CACHE.ext === ext) return ROUTINE_KIND_CACHE.value;
+  let value = null;
+  if (SQL_ROUTINE_DETECT.test(clean)) {
+    const dialect = detectSqlDialect(clean, `x${ext}`);
+    value = FOREIGN_ROUTINE_DIALECTS.has(dialect) ? dialect : (PLSQL_UNIT_DETECT.test(clean) ? "oracle" : null);
+  }
+  ROUTINE_KIND_CACHE.clean = clean; ROUTINE_KIND_CACHE.ext = ext; ROUTINE_KIND_CACHE.value = value;
+  return value;
+}
 function isPlsqlSource(ext, clean) {
-  return PLSQL_EXTENSIONS.has(ext) || (ext === ".sql" && PLSQL_UNIT_DETECT.test(clean));
+  return sqlRoutineKind(ext, clean) === "oracle";
 }
 
 function plsqlName(raw) {
@@ -896,15 +946,15 @@ function extractPlsqlSymbols(text, clean, rel, workspace) {
       const members = [];
       for (const match of code.slice(unit.headerEnd, unit.end).matchAll(PLSQL_MEMBER_RE)) {
         const offset = unit.headerEnd + match.index;
-        members.push({ name: plsqlName(match[2]).name, offset, implemented: plsqlIsImplementation(code, offset + match[0].length) });
+        members.push({ name: plsqlName(match[2]).name, kind: match[1].toLowerCase(), offset, implemented: plsqlIsImplementation(code, offset + match[0].length) });
       }
       const listed = unit.kind === "package" ? members : members.filter((item) => item.implemented);
       if (unit.kind === "package body") {
         listed.forEach((member, i) => addMethod(member.name, unit.name, unit.schema, member.offset, listed[i + 1]?.offset ?? unit.end));
       }
       symbols.push({
-        id: unit.name, type: "package", line, ...pkgFields, ...base, confidence: "MEDIUM",
-        methods: unique(listed, (item) => item.name).map((item) => ({ name: item.name, id: symbolId("", unit.name, item.name), line: atLine(item.offset), visibility: unit.kind === "package" ? "public" : "unknown" })),
+        id: unit.name, type: "package", plsql_unit: unit.kind, line, ...pkgFields, ...base, confidence: "MEDIUM",
+        methods: unique(listed, (item) => item.name).map((item) => ({ name: item.name, kind: item.kind, id: symbolId("", unit.name, item.name), line: atLine(item.offset), visibility: unit.kind === "package" ? "public" : "unknown" })),
       });
       nodes.push({ id: unit.name, type: "package", line, ...base, confidence: "MEDIUM" });
     } else if (unit.kind === "trigger") {
@@ -912,11 +962,11 @@ function extractPlsqlSymbols(text, clean, rel, workspace) {
       const timing = header.match(new RegExp(String.raw`\b(?:before|after|instead\s+of|for)\b([\s\S]*?)\bon\s+(${PLSQL_NAME})`, "i"));
       const events = timing ? [...new Set([...timing[1].matchAll(/\b(insert|update|delete)\b/gi)].map((item) => item[1].toUpperCase()))] : [];
       addMethod(unit.name, "", unit.schema, unit.start, unit.end, "db_trigger");
-      symbols.push({ id: unit.name, type: "db_trigger", line, ...pkgFields, ...(timing ? { trigger_table: plsqlName(timing[2]).name } : {}), ...(events.length ? { trigger_events: events } : {}), ...base, confidence: "MEDIUM" });
+      symbols.push({ id: unit.name, type: "db_trigger", plsql_unit: unit.kind, line, ...pkgFields, ...(timing ? { trigger_table: plsqlName(timing[2]).name } : {}), ...(events.length ? { trigger_events: events } : {}), ...base, confidence: "MEDIUM" });
       nodes.push({ id: unit.name, type: "db_trigger", line, ...base, confidence: "MEDIUM" });
     } else {
       addMethod(unit.name, "", unit.schema, unit.start, unit.end);
-      symbols.push({ id: unit.name, type: unit.kind, line, ...pkgFields, ...base, confidence: "MEDIUM" });
+      symbols.push({ id: unit.name, type: unit.kind, plsql_unit: unit.kind, line, ...pkgFields, ...base, confidence: "MEDIUM" });
     }
   }
   /* 오버로드는 같은 id로 여러 범위를 갖는다 — 범위는 모두 남기고 노드는 하나만 만든다. */
@@ -945,12 +995,13 @@ function extractPlsqlSymbols(text, clean, rel, workspace) {
  * 멤버 본문 안의 문장만 인정한다 — 같은 .sql에 섞인 시드 데이터 INSERT 수천 줄은 사용처가 아니다.
  * `SELECT a INTO v_a FROM t`의 INTO 절, `RETURNING id INTO v_id`는 테이블이 아니므로 떼고 센다.
  */
-function extractPlsqlSql(text, clean, rel, methods) {
+function extractPlsqlSql(text, clean, rel, methods, dialect = "oracle") {
   const atLine = lineIndex(text);
   const code = blankSqlStrings(clean);
   const sqls = [];
   const usages = [];
   const relations = [];
+  const label = dialect === "oracle" ? "plsql" : dialect;
   let consumed = 0;
   for (const match of code.matchAll(/\b(select|insert|update|delete|merge)\b/gi)) {
     if (match.index < consumed) continue;
@@ -961,7 +1012,15 @@ function extractPlsqlSql(text, clean, rel, methods) {
     const open = code[back] === "(" ? back : -1;
     const close = open >= 0 ? matchingParen(code, open) : -1;
     const semicolon = code.indexOf(";", match.index);
-    const end = close >= 0 ? close : semicolon >= 0 ? semicolon : owner.end;
+    let end = close >= 0 ? close : semicolon >= 0 ? semicolon : owner.end;
+    /*
+     * T-SQL 은 문장 끝 `;`가 선택이다. 그대로 두면 첫 SELECT 가 프로시저 끝까지 한 문장이 되어, 뒤에 오는 INSERT·UPDATE 의
+     * 테이블이 첫 문장의 읽기로 섞이고 그 문장들은 `consumed`에 가려 사라진다. 다음 문장이 줄 머리에서 시작하면 거기서 끊는다.
+     */
+    if (dialect === "mssql" && close < 0) {
+      const next = code.slice(match.index + 6, end).search(/(?:^|\n)[ \t]*(?:select|insert|update|delete|merge|exec(?:ute)?|declare|set|if|else|while|begin|end|return|print|with|drop|create|alter|truncate|commit|rollback|raiserror|throw|goto|fetch|open|close|go)\b/i);
+      if (next >= 0) end = match.index + 6 + next;
+    }
     let statement = code.slice(match.index, end);
     /* 오라클은 `DELETE tbl WHERE ...`처럼 FROM을 생략할 수 있다. 트리거 머리의 `DELETE ON`·`DELETE OR`는 제외. */
     if (/^delete\s+(?!from\b|on\b|or\b)[\w.$"]+/i.test(statement)) statement = statement.replace(/^delete\s+/i, "DELETE FROM ");
@@ -973,10 +1032,10 @@ function extractPlsqlSql(text, clean, rel, methods) {
       : statement.replace(/\breturning\b[\s\S]*$/i, " ");
     const using = type === "merge" ? [...forTables.matchAll(/\busing\s+([\w.$"]+)/gi)].map((item) => item[1].replace(/"/g, "")) : [];
     const line = atLine(match.index);
-    const id = `${rel}:${line}:plsql`;
+    const id = `${rel}:${line}:${label}`;
     sqls.push({ id, file: rel, line, type, tables: [...new Set([...sqlTables(forTables), ...using])], text_preview: clean.slice(match.index, end).replace(/\s+/g, " ").trim().slice(0, 240), origin: "deterministic-indexer", confidence: "MEDIUM" });
     relations.push(...extractSqlRelations(forTables, { sql_id: id, file: rel, line }));
-    usages.push({ sql_id: id, file: rel, line, method: owner.id, evidence: "PL/SQL 본문 내 정적 SQL", origin: "deterministic-indexer", confidence: "HIGH" });
+    usages.push({ sql_id: id, file: rel, line, method: owner.id, evidence: dialect === "oracle" ? "PL/SQL 본문 내 정적 SQL" : `${dialect} 루틴 본문 내 정적 SQL`, origin: "deterministic-indexer", confidence: "HIGH" });
   }
   return { sqls, usages, relations };
 }
@@ -1224,10 +1283,16 @@ function extractPbSymbols(text, clean, rel, workspace) {
 }
 
 /* `{call PKG.PROC(?)}`·`{? = call F(?)}`·`BEGIN PKG.PROC(?); END;` — JDBC·MyBatis·ADO.NET이 프로시저를 부르는 모양. */
-const PROCEDURE_CALL_TEXT = new RegExp(String.raw`^\s*(?:\{\s*(?:\?\s*=\s*)?call\s+|begin\s+)((?:${PLSQL_IDENT}\s*\.\s*){0,2}${PLSQL_IDENT})\s*[(;}]`, "i");
+/*
+ * 자바·XML 문자열이 프로시저를 부르는 모양. 오라클은 `{call PKG.PROC(?)}`·`begin PKG.PROC; end;`, 그 밖의 DB 는
+ * MySQL·PostgreSQL `CALL proc(?)`, MSSQL `EXEC usp_x ?, ?`·`EXEC [dbo].[usp_x] @a` 로 부른다. 식별자는 `"x"`·`` `x` ``·`[x]`를 모두 받는다.
+ * `exec`·`call`은 문자열이 그 단어로 **시작**할 때만 — 문장 한가운데의 "call center" 같은 글자는 부름이 아니다.
+ */
+const CALL_IDENT = String.raw`["\`\[]?[A-Za-z_][\w$#]*["\`\]]?`;
+const PROCEDURE_CALL_TEXT = new RegExp(String.raw`^\s*(?:\{\s*(?:\?\s*=\s*)?call\s+|begin\s+|call\s+|exec(?:ute)?\s+)((?:${CALL_IDENT}\s*\.\s*){0,2}${CALL_IDENT})\s*(?:[(;}]|(?=\s+[@?])|(?=\s*$))`, "i");
 
 function procedureTarget(raw) {
-  const parts = String(raw).replace(/"/g, "").split(".").map((part) => part.trim().toUpperCase()).filter(Boolean);
+  const parts = String(raw).replace(/["`\[\]]/g, "").split(".").map((part) => part.trim().toUpperCase()).filter(Boolean);
   return { name: parts.at(-1), qualifier: parts.length > 1 ? parts.at(-2) : "", procedure: true };
 }
 
@@ -1286,7 +1351,9 @@ function abstractMethodDeclarations(clean, classes) {
  */
 function extractSymbols(text, clean, rel, workspace) {
   const ext = extname(rel).toLowerCase();
-  if (isPlsqlSource(ext, clean)) return extractPlsqlSymbols(text, clean, rel, workspace);
+  const routineKind = sqlRoutineKind(ext, clean);
+  if (routineKind === "oracle") return extractPlsqlSymbols(text, clean, rel, workspace);
+  if (routineKind) return extractSqlRoutineSymbols(text, clean, rel, workspace, routineKind);
   if (PROC_EXTENSIONS.has(ext)) return extractProcSymbols(text, clean, rel, workspace);
   if (PB_EXTENSIONS.has(ext)) return extractPbSymbols(text, clean, rel, workspace);
   if (!STRUCTURED_SOURCE_EXTENSIONS.includes(ext)) {
@@ -1871,6 +1938,8 @@ function extractApi(text, clean, rel, workspace, methods, classes = []) {
 const SQL_PSEUDO_TABLES = new Set([
   "dual", "rownum", "rowid", "sysdate", "systimestamp", "level", "nextval", "currval",
   "user", "sysdba", "values", "lateral", "unnest", "table", "select",
+  /* T-SQL 트리거 안에서만 존재하는 가상 테이블 */
+  "inserted", "deleted",
 ]);
 
 /*
@@ -1898,11 +1967,11 @@ function splitTopLevelCommas(text) {
 }
 
 function sqlTables(sql) {
-  const tables = [...sql.matchAll(/\b(?:from|join|update|into|table)\s+([\w.$"`]+)/gi)].map((match) => match[1].replace(/["`]/g, ""));
+  const tables = [...sql.matchAll(/\b(?:from|join|update|into|table)\s+([\w.$"`\[\]]+)/gi)].map((match) => match[1].replace(/["`\[\]]/g, ""));
   for (const from of sql.matchAll(/\bfrom\s+([\s\S]*?)(?=\bwhere\b|\bgroup\s+by\b|\border\s+by\b|\bhaving\b|\bunion\b|$)/gi)) {
     for (const part of splitTopLevelCommas(from[1]).slice(1)) {
-      const table = part.trim().match(/^([\w.$"`]+)(?:\s+(?:as\s+)?[\w$]+)?/i)?.[1];
-      if (table && !/^(?:select|join|left|right|inner|outer|full|cross)$/i.test(table)) tables.push(table.replace(/["`]/g, ""));
+      const table = part.trim().match(/^([\w.$"`\[\]]+)(?:\s+(?:as\s+)?[\w$]+)?/i)?.[1];
+      if (table && !/^(?:select|join|left|right|inner|outer|full|cross)$/i.test(table)) tables.push(table.replace(/["`\[\]]/g, ""));
     }
   }
   return tables.filter((name) => !SQL_PSEUDO_TABLES.has(name.split(".").at(-1).toLowerCase()));
@@ -1989,7 +2058,7 @@ function extractSql(text, clean, rel, methods) {
   const sqlMapNamespace = namespace ? "" : text.match(/<sqlMap\b[^>]*namespace\s*=\s*["']([^"']+)["']/i)?.[1] || "";
   const statementId = (raw) => (namespace ? `${namespace}.${raw}` : sqlMapNamespace ? `${sqlMapNamespace}.${raw}` : raw);
   const shortId = (raw) => (sqlMapNamespace ? { statement_id: raw } : {});
-  const callableTarget = (body) => body.replace(/<!\[CDATA\[/g, "").match(PROCEDURE_CALL_TEXT)?.[1]?.replace(/"/g, "").replace(/\s+/g, "").toUpperCase();
+  const callableTarget = (body) => body.replace(/<!\[CDATA\[/g, "").match(PROCEDURE_CALL_TEXT)?.[1]?.replace(/["`\[\]]/g, "").replace(/\s+/g, "").toUpperCase();
   /* 프로시저 호출 문장은 SQL이 아니라 호출 관계다 — sql_usage가 아니라 call_graph 엣지가 된다(aggregate). */
   const callables = [];
   for (const match of text.matchAll(/<procedure\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/procedure>/gi)) {
@@ -2315,79 +2384,291 @@ function extractEnv(text, clean, rel, workspace) {
   return { profiles, branches };
 }
 
-function extractSchema(text, rel) {
+/*
+ * DDL 범용 파싱 — Oracle · MSSQL · MySQL/MariaDB · PostgreSQL.
+ * 방언마다 다른 것을 한곳에서 흡수한다: 식별자 따옴표(`"x"` · `` `x` `` · `[x]`), 꼬리절(`ENGINE=`·`ON [PRIMARY]`·`TABLESPACE`),
+ * 제약 키워드(`CLUSTERED`·`WITH CHECK`·`ALTER TABLE ONLY`), 인라인 인덱스(`KEY idx (a)`), 다단어 타입(`character varying`).
+ * 실제 DB가 낸 덤프로 검증된 것이 아니라 흔한 덤프 도구(DBMS_METADATA·SSMS·mysqldump·pg_dump)의 모양을 따른 정규식이다.
+ */
+const SQL_NAME = String.raw`[\w."\`$#\[\]]+`;
+const stripIdent = (value) => String(value).replace(/["`\[\]]/g, "");
+/* `("A", [b] ASC, `c`)` → ["A", "b", "c"] — 따옴표·대괄호·정렬 방향을 뗀다. */
+const identList = (value) => String(value).split(",").map((item) => stripIdent(item.trim()).split(/\s+/)[0]).filter(Boolean);
+/* 문장 끝: `;` 또는 `GO` 줄 중 먼저 나오는 쪽. MSSQL 덤프는 `;` 없이 GO 로 끊는다. */
+function sqlStatementEnd(code, from) {
+  const semi = code.indexOf(";", from);
+  const go = code.slice(from).search(/^[ \t]*go[ \t]*$/im);
+  const ends = [semi, go < 0 ? -1 : from + go].filter((value) => value >= 0);
+  return ends.length ? Math.min(...ends) : code.length;
+}
+/* DEFAULT 값. `(getdate())`·`((0))`처럼 괄호가 겹쳐도 짝을 맞춰 읽고, `'A'`·`now()`·`nextval('s'::regclass)`도 읽는다. */
+function readColumnDefault(rest) {
+  const found = rest.match(/\bdefault\s+(?:on\s+null\s+)?/i);
+  if (!found) return undefined;
+  const start = found.index + found[0].length;
+  if (rest[start] === "'") return rest.slice(start).match(/^'(?:[^']|'')*'/)?.[0];
+  if (rest[start] === "(") { const close = matchingParen(rest, start); return close > 0 ? rest.slice(start, close + 1) : undefined; }
+  return rest.slice(start).match(/^[\w.$]+(?:\s*\([^)]*\))?/)?.[0];
+}
+
+const COLUMN_LINE = new RegExp(
+  String.raw`^["\`\[]?([\w$#]+)["\`\]]?\s+((?:character\s+varying|double\s+precision|(?:timestamp|time)(?:\s*\(\d+\))?\s+with(?:out)?\s+time\s+zone|["\`\[]?[A-Za-z_]\w*["\`\]]?)(?:\s*\([^)]*\))?)([\s\S]*)$`,
+  "i",
+);
+
+function extractSchema(text, rel, clean = stripComments(text, ".sql")) {
   const tables = [];
-  const create = /create\s+table\s+(?:if\s+not\s+exists\s+)?([\w."`]+)\s*\(([\s\S]*?)\)\s*;/gi;
-  for (const match of text.matchAll(create)) {
+  const blank = blankSqlStrings(clean);
+  const atLine = lineIndex(text);
+  /*
+   * 본문은 여는 괄호에서 짝이 맞는 닫는 괄호까지로 잡는다. 예전에는 `\)\s*;`로 끝을 찾았는데, 오라클
+   * DBMS_METADATA.GET_DDL 출력은 `) SEGMENT CREATION IMMEDIATE ... STORAGE(...) TABLESPACE "X" ;`처럼
+   * 닫는 괄호 뒤에 꼬리절이 붙어 그 패턴에 하나도 걸리지 않는다 — 덤프한 DDL의 CREATE TABLE이 통째로 사라졌다
+   * (실측 2026-11-05). MSSQL(`) ON [PRIMARY]`+GO)·MySQL(`) ENGINE=InnoDB`)도 같은 이유로 괄호 짝으로 읽는다.
+   * 주석은 clean에서 이미 지워져 있어 주석 속 따옴표가 괄호 계산을 깨지 않는다.
+   */
+  const create = new RegExp(String.raw`create\s+(?:(?:global|private|local)\s+temporary\s+|temporary\s+|unlogged\s+|external\s+)?table\s+(?:if\s+not\s+exists\s+)?(${SQL_NAME})\s*\(`, "gi");
+  for (const header of blank.matchAll(create)) {
+    const open = header.index + header[0].length - 1;
+    const close = matchingParen(blank, open);
+    if (close < 0) continue;
+    const body = clean.slice(open + 1, close);
     const columns = [];
     const primaryKey = [];
     const foreignKeys = [];
-    for (const raw of match[2].split(/,(?![^()]*\))/)) {
+    const indexes = [];
+    for (const raw of splitTopLevelCommas(body)) {
       const line = raw.trim();
       /*
        * `CONSTRAINT PK_TB_ORDER PRIMARY KEY (ID)` 형태를 놓치고 있었다 — 이름 붙은 제약이
        * 오라클 레거시 DDL의 표준인데, `^primary key`만 보다가 아래 `^(constraint|...)` 스킵 규칙에
        * 걸려 **PK가 통째로 버려졌다.** 실제로 가상 프로젝트 5개 테이블 전부 `primary_key: []`였다.
        */
-      const pk = line.match(/^(?:constraint\s+["`]?[\w$]+["`]?\s+)?primary\s+key\s*\(([^)]+)\)/i);
-      if (pk) { primaryKey.push(...pk[1].split(",").map((v) => v.trim().replace(/["`]/g, ""))); continue; }
-      const fk = line.match(/^(?:constraint\s+["`]?([\w$]+)["`]?\s+)?foreign\s+key\s*\(([^)]+)\)\s+references\s+([\w."`$]+)\s*\(([^)]+)\)/i);
+      const pk = line.match(/^(?:constraint\s+["`\[]?[\w$#]+["`\]]?\s+)?primary\s+key\s*(?:(?:non)?clustered\s*)?\(([^)]+)\)/i);
+      if (pk) { primaryKey.push(...identList(pk[1])); continue; }
+      const fk = line.match(new RegExp(String.raw`^(?:constraint\s+["\`\[]?([\w$#]+)["\`\]]?\s+)?foreign\s+key\s*\(([^)]+)\)\s*references\s+(${SQL_NAME})\s*\(([^)]+)\)`, "i"));
       if (fk) {
         foreignKeys.push({
-          name: fk[1] || "", columns: fk[2].split(",").map((value) => value.trim().replace(/["`]/g, "")),
-          references_table: fk[3].replace(/["`]/g, ""), references_columns: fk[4].split(",").map((value) => value.trim().replace(/["`]/g, "")),
+          name: fk[1] || "", columns: identList(fk[2]), references_table: stripIdent(fk[3]), references_columns: identList(fk[4]),
           origin: "deterministic-indexer", confidence: "HIGH",
         });
         continue;
       }
-      if (/^(constraint|foreign|unique|check)\b/i.test(line)) continue;
-      const column = line.match(/^["`]?([\w$]+)["`]?\s+([\w]+(?:\s*\([^)]*\))?)([\s\S]*)$/);
+      /* MySQL 인라인 인덱스 `KEY idx (a,b)` · `UNIQUE KEY idx (a)`. 컬럼으로 읽으면 `KEY`라는 가짜 컬럼이 생긴다. */
+      const inlineIndex = line.match(/^(?:(unique|fulltext|spatial)\s+)?(?:key|index)\s+(?:["`\[]?([\w$#]+)["`\]]?\s*)?\(([^)]+)\)/i);
+      if (inlineIndex) { indexes.push({ name: inlineIndex[2] || "", columns: identList(inlineIndex[3]), unique: /unique/i.test(inlineIndex[1] || ""), origin: "deterministic-indexer", confidence: "HIGH" }); continue; }
+      if (/^(constraint|foreign|unique|check|exclude|period|like)\b/i.test(line)) continue;
+      const column = line.match(COLUMN_LINE);
       if (!column) continue;
       const inlinePk = /primary\s+key/i.test(column[3]);
       if (inlinePk) primaryKey.push(column[1]);
-      const inlineFk = column[3].match(/\breferences\s+([\w."`$]+)\s*\(([^)]+)\)/i);
+      const inlineFk = column[3].match(new RegExp(String.raw`\breferences\s+(${SQL_NAME})\s*\(([^)]+)\)`, "i"));
       if (inlineFk) foreignKeys.push({
-        name: "", columns: [column[1]], references_table: inlineFk[1].replace(/["`]/g, ""),
-        references_columns: inlineFk[2].split(",").map((value) => value.trim().replace(/["`]/g, "")),
+        name: "", columns: [column[1]], references_table: stripIdent(inlineFk[1]), references_columns: identList(inlineFk[2]),
         origin: "deterministic-indexer", confidence: "HIGH",
       });
-      columns.push({ name: column[1], type: column[2], nullable: !/not\s+null/i.test(column[3]), primary_key: inlinePk });
+      const defaultValue = readColumnDefault(column[3]);
+      columns.push({ name: column[1], type: stripIdent(column[2]).replace(/\s+/g, " ").trim(), nullable: !/not\s+null/i.test(column[3]) && !inlinePk, primary_key: inlinePk, ...(defaultValue !== undefined ? { default: defaultValue } : {}) });
     }
-    tables.push({ name: match[1].replace(/["`]/g, ""), columns, primary_key: [...new Set(primaryKey)], foreign_keys: foreignKeys, indexes: [], source_file: rel, origin: "deterministic-indexer", confidence: "MEDIUM" });
+    const tableName = stripIdent(header[1]);
+    tables.push({ name: tableName, ...(tableName.includes(".") ? { schema: tableName.split(".").slice(0, -1).join(".") } : {}), columns, primary_key: [...new Set(primaryKey)], foreign_keys: foreignKeys, indexes, source_file: rel, line: atLine(header.index), origin: "deterministic-indexer", confidence: "MEDIUM" });
   }
   /*
    * `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY/FOREIGN KEY ...`를 전혀 읽지 않았다.
    * 레거시 DDL은 테이블을 먼저 만들고 제약을 뒤에 몰아서 거는 형태가 매우 흔한데, 그 경우
    * 스키마에 관계가 하나도 남지 않아 위키의 ERD·"이 테이블은 무엇과 엮여 있나"가 비어 버렸다.
+   * pg_dump 는 `ALTER TABLE ONLY`, SSMS 는 `WITH CHECK ADD CONSTRAINT ... CLUSTERED (...)` 형태로 낸다.
    */
   const tableByName = (name) => {
-    const bare = name.replace(/["`]/g, "");
+    const bare = stripIdent(name);
     return tables.find((item) => item.name.toLowerCase() === bare.toLowerCase()
       || item.name.split(".").at(-1).toLowerCase() === bare.split(".").at(-1).toLowerCase());
   };
-  for (const match of text.matchAll(/alter\s+table\s+([\w."`$]+)\s+add\s+(?:constraint\s+["`]?([\w$]+)["`]?\s+)?(primary\s+key|foreign\s+key)\s*\(([^)]+)\)(?:\s*references\s+([\w."`$]+)\s*\(([^)]+)\))?/gi)) {
+  const alter = new RegExp(String.raw`alter\s+table\s+(?:only\s+)?(${SQL_NAME})\s+(?:with\s+(?:no)?check\s+)?add\s+(?:constraint\s+(${SQL_NAME})\s+)?(primary\s+key|foreign\s+key)\s*(?:(?:non)?clustered\s*)?\(([^)]+)\)(?:\s*references\s+(${SQL_NAME})\s*\(([^)]+)\))?`, "gi");
+  for (const match of clean.matchAll(alter)) {
     const table = tableByName(match[1]);
     if (!table) continue;
-    const columns = match[4].split(",").map((value) => value.trim().replace(/["`]/g, ""));
+    const columns = identList(match[4]);
     if (/primary/i.test(match[3])) {
       table.primary_key = [...new Set([...table.primary_key, ...columns])];
       for (const column of table.columns) if (columns.includes(column.name)) column.primary_key = true;
     } else if (match[5]) {
       table.foreign_keys.push({
-        name: match[2] || "", columns,
-        references_table: match[5].replace(/["`]/g, ""),
-        references_columns: match[6].split(",").map((value) => value.trim().replace(/["`]/g, "")),
+        name: match[2] ? stripIdent(match[2]) : "", columns,
+        references_table: stripIdent(match[5]), references_columns: identList(match[6]),
         origin: "deterministic-indexer", confidence: "HIGH",
       });
     }
   }
-  for (const match of text.matchAll(/create\s+(unique\s+)?index\s+(?:if\s+not\s+exists\s+)?["`]?([\w$]+)["`]?\s+on\s+([\w."`$]+)\s*\(([^)]+)\)/gi)) {
-    const tableName = match[3].replace(/["`]/g, "");
-    const table = tables.find((item) => item.name.toLowerCase() === tableName.toLowerCase() || item.name.split(".").at(-1).toLowerCase() === tableName.split(".").at(-1).toLowerCase());
+  /* 인덱스 이름이 `"HRD"."UX_ENROLL"`처럼 스키마를 달고 있어도 읽는다(DBMS_METADATA 출력은 항상 그렇다). PG 는 `USING btree`, MSSQL 은 `NONCLUSTERED`가 낀다. */
+  const index = new RegExp(String.raw`create\s+(?:bitmap\s+)?(unique\s+)?(?:(?:non)?clustered\s+)?(?:(?:non)?columnstore\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?(?:${SQL_NAME}\s*\.\s*)?["\`\[]?([\w$#]+)["\`\]]?\s+on\s+(?:only\s+)?(${SQL_NAME})\s*(?:using\s+\w+\s*)?\(([^)]+)\)`, "gi");
+  for (const match of clean.matchAll(index)) {
+    const table = tableByName(match[3]);
     if (!table) continue;
-    table.indexes.push({ name: match[2], columns: match[4].split(",").map((value) => value.trim().replace(/["`]/g, "").split(/\s+/)[0]), unique: Boolean(match[1]), origin: "deterministic-indexer", confidence: "HIGH" });
+    table.indexes.push({ name: match[2], columns: identList(match[4]), unique: Boolean(match[1]), origin: "deterministic-indexer", confidence: "HIGH" });
   }
   return tables;
+}
+
+/*
+ * 테이블 밖의 DB 객체 — 뷰·시퀀스·시노님. 오라클 덤프에는 이 셋이 항상 같이 들어 있고, 앱의 SQL은 시노님·뷰 이름으로
+ * 테이블을 부르는 일이 흔해 "이 이름이 결국 무슨 테이블인가"를 알아야 영향도가 이어진다.
+ * 뷰는 본문의 FROM/JOIN 테이블을 함께 남긴다(뷰가 의존하는 테이블이 바뀌면 영향받는다).
+ */
+function extractDbObjects(text, rel, clean = stripComments(text, ".sql")) {
+  const atLine = lineIndex(text);
+  const blank = blankSqlStrings(clean);
+  const views = [];
+  const viewHead = new RegExp(String.raw`create\s+(?:or\s+(?:replace|alter)\s+)?(?:(?:no)?force\s+)?(?:(?:non)?editionable\s+)?(?:algorithm\s*=\s*\w+\s+)?(?:definer\s*=\s*\S+\s+)?(?:sql\s+security\s+\w+\s+)?(?:(?:temp|temporary|recursive)\s+)?(materialized\s+)?view\s+(${SQL_NAME})`, "gi");
+  for (const match of blank.matchAll(viewHead)) {
+    const from = match.index + match[0].length;
+    const after = blank.slice(from);
+    const body = after.search(/\bas\b\s*\(?\s*(?:select|with)\b/i);
+    if (body < 0) continue;
+    const select = blank.slice(from + body, sqlStatementEnd(blank, from + body)).replace(/^\s*as\s*/i, "");
+    const name = stripIdent(match[2]);
+    views.push({
+      name, ...(name.includes(".") ? { schema: name.split(".").slice(0, -1).join(".") } : {}),
+      materialized: Boolean(match[1]), tables: [...new Set(sqlTables(select).map(stripIdent))],
+      file: rel, line: atLine(match.index), origin: "deterministic-indexer", confidence: "MEDIUM",
+    });
+  }
+  const sequences = [];
+  for (const match of blank.matchAll(new RegExp(String.raw`create\s+sequence\s+(?:if\s+not\s+exists\s+)?(${SQL_NAME})`, "gi"))) {
+    const from = match.index + match[0].length;
+    const options = blank.slice(from, sqlStatementEnd(blank, from));
+    const option = (name) => options.match(new RegExp(String.raw`\b${name}\s+(-?\d+)`, "i"))?.[1];
+    sequences.push({
+      name: stripIdent(match[1]), start_with: option("start\\s+with") ?? null, increment_by: option("increment\\s+by") ?? null,
+      file: rel, line: atLine(match.index), origin: "deterministic-indexer", confidence: "HIGH",
+    });
+  }
+  const synonyms = [];
+  for (const match of blank.matchAll(new RegExp(String.raw`create\s+(?:or\s+(?:replace|alter)\s+)?(?:(?:non)?editionable\s+)?(public\s+)?synonym\s+(${SQL_NAME})\s+for\s+(${SQL_NAME}(?:@\w+)?)`, "gi"))) {
+    const target = stripIdent(match[3]);
+    synonyms.push({
+      name: stripIdent(match[2]), target: target.split("@")[0], ...(target.includes("@") ? { db_link: target.split("@")[1] } : {}),
+      public: Boolean(match[1]), file: rel, line: atLine(match.index), origin: "deterministic-indexer", confidence: "HIGH",
+    });
+  }
+  return { views, sequences, synonyms };
+}
+
+/*
+ * T-SQL · MySQL · PL/pgSQL 루틴(프로시저·함수·트리거).
+ * 오라클 추출기(extractPlsqlSymbols)와 같은 모양의 사실을 낸다 — 그래야 집계(schema.json 의 procedures·functions·triggers,
+ * 호출 그래프, 자바 `{call}` 연결)가 방언을 가리지 않고 그대로 쓴다. 정규식 기반 근사다: 동적 SQL(`EXEC(@sql)`·`EXECUTE format()`)과
+ * 오버로드는 따라가지 않고, 호출은 `EXEC`·`CALL`·`PERFORM`처럼 문장으로 드러난 것만 잡는다(`SELECT fn()`은 내장 함수와 구분할 수 없어 뺀다).
+ * 실제 DB가 낸 덤프로 검증된 것이 아니라 SSMS·mysqldump·pg_dump 가 내는 모양을 따랐다.
+ */
+function routineUnitRegex(dialect) {
+  if (dialect === "mssql") return new RegExp(String.raw`\bcreate\s+(?:or\s+alter\s+)?(procedure|proc|function|trigger)\s+(${SQL_NAME})`, "gi");
+  if (dialect === "mysql") return new RegExp(String.raw`\bcreate\s+(?:definer\s*=\s*\S+\s+)?(procedure|function|trigger)\s+(?:if\s+not\s+exists\s+)?(${SQL_NAME})`, "gi");
+  return new RegExp(String.raw`\bcreate\s+(?:or\s+replace\s+)?(?:constraint\s+)?(procedure|function|trigger)\s+(${SQL_NAME})`, "gi");
+}
+function routineCallRegexes(dialect) {
+  if (dialect === "mssql") return [
+    new RegExp(String.raw`\bexec(?:ute)?\s+(?:@\w+\s*=\s*)?(${SQL_NAME})`, "gi"),
+    /\bdbo\s*\.\s*(fn_\w+|\w+)\s*\(/gi,
+  ];
+  if (dialect === "mysql") return [new RegExp(String.raw`\bcall\s+(${SQL_NAME})\s*(?:\(|;|$)`, "gim")];
+  return [new RegExp(String.raw`\b(?:perform|call)\s+(${SQL_NAME})\s*\(`, "gi")];
+}
+const ROUTINE_CALL_SKIP = new Set(["SP_EXECUTESQL", "EXECUTE", "IMMEDIATE", "SP_RENAME", "SP_SETAPPROLE"]);
+function routineName(raw) {
+  const parts = stripIdent(raw).split(".").map((part) => part.trim().toUpperCase()).filter(Boolean);
+  return { schema: parts.length > 1 ? parts.at(-2) : "", name: parts.at(-1) || "" };
+}
+
+function extractSqlRoutineSymbols(text, clean, rel, workspace, dialect) {
+  const atLine = lineIndex(text);
+  const code = blankSqlStrings(clean);
+  const base = { file: rel, workspace: workspace.id, origin: "deterministic-indexer" };
+  const units = [...code.matchAll(routineUnitRegex(dialect))].map((match) => ({
+    kind: /^proc/i.test(match[1]) ? "procedure" : match[1].toLowerCase(),
+    ...routineName(match[2]),
+    start: match.index,
+    headerEnd: match.index + match[0].length,
+  }));
+  /*
+   * 단위의 끝: 다음 단위 시작 전까지가 기본이고, 그 앞에서 먼저 끊기는 경계가 있으면 거기서 끊는다.
+   * 경계를 안 두면 루틴 뒤에 오는 시드 INSERT·권한 GRANT 가 그 루틴의 사용처로 섞인다.
+   *   MSSQL — `GO` 줄(배치 구분) · MySQL — `DELIMITER` 줄 · PostgreSQL — 달러 인용 본문(`$$ ... $$`)의 끝.
+   */
+  const boundary = dialect === "mssql" ? /^[ \t]*go[ \t]*$/im : dialect === "mysql" ? /^[ \t]*delimiter\b/im : null;
+  units.forEach((unit, index) => {
+    let end = units[index + 1]?.start ?? code.length;
+    if (boundary) {
+      const cut = code.slice(unit.headerEnd, end).search(boundary);
+      if (cut >= 0) end = unit.headerEnd + cut;
+    }
+    if (dialect === "postgresql") {
+      const tag = code.slice(unit.headerEnd, end).match(/\$([A-Za-z_]\w*)?\$/);
+      if (tag) {
+        const close = code.indexOf(tag[0], unit.headerEnd + tag.index + tag[0].length);
+        if (close >= 0) end = Math.min(end, close + tag[0].length);
+      } else {
+        /* 본문이 없는 단위(트리거는 함수를 실행할 뿐이다)는 그 문장의 `;`에서 끝난다 — 뒤에 오는 시드 INSERT 를 삼키지 않는다. */
+        const semi = code.indexOf(";", unit.headerEnd);
+        if (semi >= 0) end = Math.min(end, semi + 1);
+      }
+    }
+    unit.end = end;
+  });
+
+  const symbols = [];
+  const nodes = [];
+  const methods = [];
+  const callSites = [];
+  const addMethod = (name, schema, start, end, type = "method") => {
+    methods.push({ id: symbolId("", "", name), name, owner: "", package: schema, file: rel, line: atLine(start), start, end, visibility: "unknown", workspace: workspace.id, type });
+  };
+  for (const unit of units) {
+    const line = atLine(unit.start);
+    const pkgFields = unit.schema ? { package: unit.schema } : {};
+    if (unit.kind === "trigger") {
+      const header = code.slice(unit.headerEnd, Math.min(unit.end, unit.headerEnd + 2000));
+      let table = null;
+      let events = [];
+      let calls = null;
+      if (dialect === "mssql") {
+        table = header.match(new RegExp(String.raw`\bon\s+(${SQL_NAME})`, "i"))?.[1] ?? null;
+        const upToAs = header.slice(0, Math.max(0, header.search(/\bas\b/i)) || header.length);
+        events = [...new Set([...upToAs.matchAll(/\b(insert|update|delete)\b/gi)].map((item) => item[1].toUpperCase()))];
+      } else if (dialect === "mysql") {
+        const head = header.match(new RegExp(String.raw`\b(?:before|after)\s+(insert|update|delete)\s+on\s+(${SQL_NAME})`, "i"));
+        if (head) { events = [head[1].toUpperCase()]; table = head[2]; }
+      } else {
+        const head = header.match(new RegExp(String.raw`\b(?:before|after|instead\s+of)\s+((?:insert|update|delete|truncate)(?:\s+of\s+[\w\s,]+?)?(?:\s+or\s+(?:insert|update|delete|truncate)(?:\s+of\s+[\w\s,]+?)?)*)\s+on\s+(${SQL_NAME})`, "i"));
+        if (head) { events = [...new Set([...head[1].matchAll(/\b(insert|update|delete|truncate)\b/gi)].map((item) => item[1].toUpperCase()))]; table = head[2]; }
+        calls = header.match(new RegExp(String.raw`\bexecute\s+(?:function|procedure)\s+(${SQL_NAME})`, "i"))?.[1] ?? null;
+      }
+      addMethod(unit.name, unit.schema, unit.start, unit.end, "db_trigger");
+      symbols.push({ id: unit.name, type: "db_trigger", plsql_unit: "trigger", dialect, line, ...pkgFields, ...(table ? { trigger_table: routineName(table).name } : {}), ...(events.length ? { trigger_events: events } : {}), ...base, confidence: "MEDIUM" });
+      nodes.push({ id: unit.name, type: "db_trigger", line, ...base, confidence: "MEDIUM" });
+      /* PostgreSQL 트리거는 본문이 없고 함수를 실행한다 — 트리거 → 함수 호출로 잇는다. */
+      if (calls) callSites.push({ caller: unit.name, name: routineName(calls).name, qualifier: "", file: rel, line, workspace: workspace.id });
+    } else {
+      addMethod(unit.name, unit.schema, unit.start, unit.end);
+      symbols.push({ id: unit.name, type: unit.kind, plsql_unit: unit.kind, dialect, line, ...pkgFields, ...base, confidence: "MEDIUM" });
+    }
+  }
+  for (const method of unique(methods.filter((item) => item.type === "method"), (item) => item.id)) {
+    nodes.push({ id: method.id, type: "method", line: method.line, visibility: method.visibility, ...base, confidence: "MEDIUM" });
+  }
+  const regexes = routineCallRegexes(dialect);
+  for (const method of methods) {
+    const body = code.slice(method.start, method.end);
+    for (const regex of regexes) {
+      for (const match of body.matchAll(regex)) {
+        const name = routineName(match[1]).name;
+        if (!name || ROUTINE_CALL_SKIP.has(name)) continue;
+        if (name === method.name && match.index < 200) continue;
+        callSites.push({ caller: method.id, name, qualifier: "", file: rel, line: atLine(method.start + match.index), workspace: workspace.id });
+      }
+    }
+  }
+  return { symbols, nodes, methods, callSites, injects: [], fields: [], classes: [] };
 }
 
 /*
@@ -2963,15 +3244,17 @@ export function extractRepx(text, rel) {
 function analyzeFile(file, root, config) {
   const buffer = readFileSync(file.full);
   const decoded = decodeSource(buffer);
-  const text = decoded.text;
   const ext = extname(file.rel).toLowerCase();
+  /* mysqldump 는 뷰·루틴·트리거를 `/*!50001 ... *\/` 조건부 주석으로 감싼다. 주석으로 지우면 통째로 사라지니 먼저 풀어 준다(길이 유지). */
+  const text = DDL_EXTENSIONS.has(ext) && /\/\*!\d{5}/.test(decoded.text) ? unwrapMysqlConditionalComments(decoded.text) : decoded.text;
   const clean = stripComments(text, ext);
   const workspace = workspaceFor(file.rel, config);
   const symbolFacts = extractSymbols(text, clean, file.rel, workspace);
   const nexacro = extractNexacro(text, file.rel, workspace);
   const api = extractApi(text, clean, file.rel, workspace, symbolFacts.methods, symbolFacts.classes);
   const sql = extractSql(text, clean, file.rel, symbolFacts.methods);
-  const embedded = symbolFacts.sqlFacts || (isPlsqlSource(ext, clean) ? extractPlsqlSql(text, clean, file.rel, symbolFacts.methods)
+  const routineKind = sqlRoutineKind(ext, clean);
+  const embedded = symbolFacts.sqlFacts || (routineKind ? extractPlsqlSql(text, clean, file.rel, symbolFacts.methods, routineKind)
     : PROC_EXTENSIONS.has(ext) ? extractProcSql(text, clean, file.rel, symbolFacts.methods) : null);
   if (embedded) { sql.sqls.push(...embedded.sqls); sql.usages.push(...embedded.usages); sql.relations.push(...embedded.relations); }
   const repx = ext === ".repx" ? extractRepx(text, file.rel) : null;
@@ -3003,7 +3286,10 @@ function analyzeFile(file, root, config) {
     boundaries: extractTransactions(text, clean, file.rel, workspace, symbolFacts.methods),
     communications: extractExternalIo(text, clean, file.rel, workspace, symbolFacts.methods),
     env: extractEnv(text, clean, file.rel, workspace),
-    tables: ext === ".sql" ? extractSchema(text, file.rel) : [],
+    /* DDL·PL/SQL 계열 파일의 SQL 방언(oracle·mssql·mysql·postgresql·generic). 집계가 schema._meta.dialect 와 db_source 에 옮긴다. */
+    sqlDialect: DDL_EXTENSIONS.has(ext) || PLSQL_EXTENSIONS.has(ext) ? detectSqlDialect(clean, file.rel) : undefined,
+    tables: DDL_EXTENSIONS.has(ext) ? extractSchema(text, file.rel, clean) : [],
+    ...(DDL_EXTENSIONS.has(ext) ? ((objects) => ({ dbViews: objects.views, dbSequences: objects.sequences, dbSynonyms: objects.synonyms }))(extractDbObjects(text, file.rel, clean)) : {}),
     clientRefs: extractClientRefs(text, file.rel),
     springBeans: extractSpringBeans(text, file.rel),
     springTx: extractSpringTransactionConfig(text, file.rel),
@@ -3232,6 +3518,74 @@ function pairConfig(root) {
 }
 
 /* sql_usage의 tables를 테이블 목록으로 뒤집는다. DDL이 없을 때만 쓰는 폴백이다. */
+/*
+ * PL/SQL 프로그램 단위를 schema.json의 procedures·functions·triggers로 옮긴다. 파서가 이미 만든 사실(패키지 심볼·
+ * 본문 내 정적 SQL 사용처·호출 엣지)을 모으기만 한다 — 새로 추측하는 것은 없다.
+ * 각 단위가 읽고 쓰는 테이블, 부르는 단위, 부르는 쪽(다른 PL/SQL · 자바/JSP 같은 외부)을 한 줄에 둬서
+ * "이 테이블을 바꾸면 어느 프로시저가 영향받나"가 schema.json 한 곳에서 답이 나오게 한다.
+ * 스펙만 있고 본문이 덤프에 없는 멤버는 implemented:false로 남긴다(본문 로직을 못 읽었다는 표시).
+ */
+function buildPlsqlSchemaObjects({ symbols, sqls, usages, edges }) {
+  const units = new Map();
+  const triggers = new Map();
+  for (const symbol of symbols) {
+    /* JS·PowerBuilder 등 다른 언어도 type:"function" 심볼을 만든다. PL/SQL 추출기가 단 표식(plsql_unit)이 있는 것만 본다. */
+    if (!symbol.plsql_unit) continue;
+    if (symbol.type === "package") {
+      const body = symbol.plsql_unit === "package body";
+      for (const member of symbol.methods || []) {
+        const unit = units.get(member.id) || { id: member.id, name: member.name, package: symbol.id, kind: member.kind || "unknown", dialect: "oracle", implemented: false };
+        if (symbol.package && !unit.schema) unit.schema = symbol.package;
+        if (body) { unit.implemented = true; unit.file = symbol.file; unit.line = member.line; }
+        else { unit.visibility = "public"; unit.spec_file = symbol.file; if (!unit.file) { unit.file = symbol.file; unit.line = member.line; } }
+        units.set(member.id, unit);
+      }
+    } else if (symbol.type === "procedure" || symbol.type === "function") {
+      units.set(symbol.id, { id: symbol.id, name: symbol.id, package: null, ...(symbol.package ? { schema: symbol.package } : {}), kind: symbol.type, dialect: symbol.dialect || "oracle", implemented: true, file: symbol.file, line: symbol.line });
+    } else if (symbol.type === "db_trigger") {
+      triggers.set(symbol.id, { id: symbol.id, name: symbol.id, ...(symbol.package ? { schema: symbol.package } : {}), table: symbol.trigger_table || null, events: symbol.trigger_events || [], dialect: symbol.dialect || "oracle", file: symbol.file, line: symbol.line });
+    }
+  }
+  const any = (id) => units.get(id) || triggers.get(id);
+  const reads = new Map();
+  const writes = new Map();
+  const sqlById = new Map(sqls.map((item) => [item.id, item]));
+  for (const usage of usages) {
+    if (!any(usage.method)) continue;
+    const sql = sqlById.get(usage.sql_id);
+    if (!sql) continue;
+    const bucket = sql.type === "select" ? reads : ["insert", "update", "delete", "merge"].includes(sql.type) ? writes : null;
+    if (!bucket) continue;
+    if (!bucket.has(usage.method)) bucket.set(usage.method, new Set());
+    for (const table of sql.tables || []) bucket.get(usage.method).add(table);
+  }
+  const calls = new Map();
+  const calledBy = new Map();
+  const externalCallers = new Map();
+  const push = (map, key, value) => { if (!map.has(key)) map.set(key, new Set()); map.get(key).add(value); };
+  for (const edge of edges) {
+    if (edge.type !== "call") continue;
+    if (any(edge.from) && any(edge.to)) { push(calls, edge.from, edge.to); push(calledBy, edge.to, edge.from); }
+    else if (!any(edge.from) && any(edge.to)) push(externalCallers, edge.to, edge.from);
+  }
+  const list = (map, id, cap = 50) => [...(map.get(id) || [])].sort(byCodeUnit).slice(0, cap);
+  const shape = (item) => ({
+    ...item, tables_read: list(reads, item.id), tables_written: list(writes, item.id), calls: list(calls, item.id),
+    called_by: list(calledBy, item.id), external_callers: list(externalCallers, item.id, 25),
+    origin: "deterministic-indexer", confidence: "MEDIUM",
+  });
+  const all = [...units.values()].sort((a, b) => byCodeUnit(a.id, b.id)).map(shape);
+  return {
+    procedures: all.filter((item) => item.kind !== "function"),
+    functions: all.filter((item) => item.kind === "function"),
+    triggers: [...triggers.values()].sort((a, b) => byCodeUnit(a.id, b.id)).map((item) => {
+      const shaped = shape(item);
+      delete shaped.called_by; delete shaped.external_callers;
+      return shaped;
+    }),
+  };
+}
+
 function deriveTablesFromSql(sqls) {
   const usage = new Map();
   for (const item of sqls) {
@@ -3519,6 +3873,18 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   const dbProcedures = new Map();
   for (const call of callSites) {
     let candidates = nodeBySimple.get(call.name) || [];
+    /*
+     * `{call dbo.usp_x}`·`{call HRD.PR_X}`의 `dbo.`·`HRD.`는 패키지가 아니라 **스키마**다. 독립 프로시저·함수의 id 에는 스키마가 없어서
+     * 아래 한정자 필터(id 에 한정자가 들어 있는 후보만 남김)가 그 후보를 전부 버리고, 정의가 덤프에 있는데도 "정의 없는 프로시저"가 됐다.
+     * 정확히 그 이름의 독립 DB 루틴이 하나뿐이면 한정자를 스키마로 보고 잇는다. 패키지 멤버(`PKG.NAME`)는 id 가 달라 영향받지 않는다.
+     */
+    if (call.procedure && call.qualifier) {
+      const standalone = candidates.filter((item) => item.id === call.name && /\.(?:sql|prc|fnc|trg|pls|pks|pkb)$/i.test(item.file || ""));
+      if (standalone.length === 1 && standalone[0].id !== call.caller) {
+        edges.push({ from: call.caller, to: standalone[0].id, type: "call", file: call.file, line: call.line, workspace: call.workspace, origin: "deterministic-indexer", confidence: "MEDIUM" });
+        continue;
+      }
+    }
     /* 한정자 없는 화면 스크립트 호출만 좁힌다 — `opener.fnX()`·`parent.fnX()`는 정당하게 다른 화면을 가리킨다. */
     if (!call.qualifier && MARKUP_PAGE.test(call.file || "")) candidates = pageCandidates(call.file, call.name, candidates);
     if (call.qualifier) {
@@ -3828,13 +4194,54 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
    */
   const derivedTables = tables.length ? [] : deriveTablesFromSql(sqls);
   const schemaTables = tables.length ? tables : derivedTables;
-  if (schemaTables.length || schemaRelations.length) output.schema = {
+  const dbViews = unique(facts.flatMap((item) => item.dbViews || []), (item) => item.name.toLowerCase());
+  const dbSequences = unique(facts.flatMap((item) => item.dbSequences || []), (item) => item.name.toLowerCase());
+  const dbSynonyms = unique(facts.flatMap((item) => item.dbSynonyms || []), (item) => `${item.public ? "public:" : ""}${item.name.toLowerCase()}`);
+  /* 중복 제거된 symbols가 아니라 원본을 넘긴다 — 같은 id의 패키지 스펙·바디가 하나로 합쳐지면 스펙 파일과 본문 유무를 알 수 없다. */
+  const plsqlSymbols = facts.flatMap((item) => item.symbols).filter((item) => item.plsql_unit);
+  const plsqlObjects = buildPlsqlSchemaObjects({ symbols: plsqlSymbols, sqls, usages, edges: uniqueEdges });
+  const hasDbObjects = dbViews.length || dbSequences.length || dbSynonyms.length
+    || plsqlObjects.procedures.length || plsqlObjects.functions.length || plsqlObjects.triggers.length;
+  if (schemaTables.length || schemaRelations.length || hasDbObjects) output.schema = {
     _meta: {
       ...common, relation_count: schemaRelations.length,
-      source: tables.length ? "ddl" : (derivedTables.length ? "derived-from-sql" : "none"),
+      source: tables.length || dbViews.length ? "ddl" : (derivedTables.length ? "derived-from-sql" : (hasDbObjects ? "source-objects" : "none")),
     },
-    tables: schemaTables, relations: schemaRelations, views: [], procedures: [], functions: [], triggers: [],
+    tables: schemaTables, relations: schemaRelations, views: dbViews, sequences: dbSequences, synonyms: dbSynonyms,
+    procedures: plsqlObjects.procedures, functions: plsqlObjects.functions, triggers: plsqlObjects.triggers,
   };
+  /*
+   * DB 소스 현황 — harness-init이 "DB 쪽을 얼마나 읽었나 / 무엇이 빠졌나"를 사용자에게 바로 말할 수 있게 한다.
+   * 핵심은 undefined_procedures: 자바·XML이 부르는데 이 저장소에는 정의가 없는 프로시저다. 덤프를 요청할 때
+   * "이 프로시저 소스를 내보내 주세요"라고 정확히 짚어 줄 수 있고, 호출 횟수 순이라 급한 것부터 알 수 있다.
+   * 이름은 소스의 `{call ...}`·CALLABLE 에서 온 사실이고 추측이 아니다.
+   */
+  const dbSourceFiles = facts.filter((item) => item.tables?.length || item.dbViews?.length || item.symbols?.some((symbol) => symbol.plsql_unit)).length;
+  const calledBy = new Map();
+  for (const edge of uniqueEdges) calledBy.set(edge.to, (calledBy.get(edge.to) || 0) + 1);
+  const undefinedProcedures = nodes
+    .filter((node) => node.type === "db_procedure" && node.source === "external")
+    .map((node) => ({ name: String(node.id).replace(/^db:/, ""), callers: calledBy.get(node.id) || 0, first_call: node.file ? `${node.file}:${node.line ?? 1}` : null }))
+    .sort((a, b) => b.callers - a.callers || byCodeUnit(a.name, b.name));
+  /* 방언 분포. 하나뿐이면 schema._meta.dialect 로 올리고, 섞여 있으면 "mixed" 로 둔다(generic 은 판별 불가라 세지 않는다). */
+  const dialectCounts = {};
+  for (const item of facts) {
+    if (item.sqlDialect && (item.tables?.length || item.dbViews?.length || item.symbols?.some((symbol) => symbol.plsql_unit))) dialectCounts[item.sqlDialect] = (dialectCounts[item.sqlDialect] || 0) + 1;
+  }
+  const concreteDialects = Object.keys(dialectCounts).filter((name) => name !== "generic");
+  const dominantDialect = concreteDialects.length === 1 ? concreteDialects[0] : concreteDialects.length > 1 ? "mixed" : null;
+  if (output.schema && dominantDialect) output.schema._meta.dialect = dominantDialect;
+  if (dbSourceFiles || hasDbObjects || undefinedProcedures.length) {
+    globalMeta.db_source = {
+      dump_paths: config.db_dump_paths || [],
+      source_files: dbSourceFiles,
+      dialects: dialectCounts,
+      tables: tables.length, views: dbViews.length, sequences: dbSequences.length, synonyms: dbSynonyms.length,
+      packages: new Set(plsqlSymbols.filter((item) => item.type === "package").map((item) => item.id)).size,
+      procedures: plsqlObjects.procedures.length, functions: plsqlObjects.functions.length, triggers: plsqlObjects.triggers.length,
+      undefined_procedures: { count: undefinedProcedures.length, items: undefinedProcedures.slice(0, 50) },
+    };
+  }
   if (Object.values(uiFlow).some((items) => items.length)) output.ui_flow = { _meta: common, ...uiFlow };
   /*
    * 단일 저장소에서도 자기 엔드포인트·소비처를 기록한다.
@@ -4519,6 +4926,8 @@ function buildAnalysisInput(output, globalMeta, unresolved, decidableCount, deci
     tier: globalMeta.tier,
     complexity: globalMeta.complexity,
     adapter_coverage: globalMeta.adapter_coverage,
+    /* DB 소스를 얼마나 읽었나, 호출되지만 정의가 없는 프로시저는 무엇인가 — analyzer가 리포트에 그대로 옮긴다. */
+    ...(globalMeta.db_source ? { db_source: globalMeta.db_source } : {}),
     coverage: {
       source_file_count: globalMeta.source_file_count,
       indexed_files: globalMeta.indexes,
@@ -4795,7 +5204,16 @@ export function buildIndex(options) {
     _meta: { generated_at: generatedAt, generator: "deterministic-indexer", group_count: groups.length, decidable_raw_count: decidableCount, total_occurrences: decidableItems.length },
     groups: cappedGroups,
   });
-  if (!preservePatch && existsSync(stalePatch)) rmSync(stalePatch);
+  if (!preservePatch && existsSync(stalePatch)) {
+    /*
+     * init 재인덱싱은 새 분석이라 이전 patch를 적용하지 않는다. 그렇다고 지우면 analyzer가 LLM으로 판정한 결과
+     * (resolve_group·설명 보강)가 말없이 사라진다(실측 2026-11-05: init 재실행 한 번에 판정 2건 소실).
+     * 지우지 않고 _ai_patch.prev.json으로 옮겨 두어, 필요하면 되돌리거나 다시 병합할 수 있게 한다.
+     */
+    const backup = join(indexDir, "_ai_patch.prev.json");
+    renameSync(stalePatch, backup);
+    process.stderr.write(`경고: --mode init 재인덱싱으로 기존 AI patch를 적용하지 않았습니다. 보존 위치: ${slash(relative(root, backup))} (이어서 쓰려면 incremental 모드를 사용하세요)\n`);
+  }
   return { root, files: files.length, analyzed, reused, tier: normalized.tier, complexity, adapter_coverage: coverage, indexes: Object.keys(output), unresolved: unresolved.length };
 }
 

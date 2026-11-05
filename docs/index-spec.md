@@ -132,6 +132,7 @@ FROM/JOIN 절의 `ROWNUM`·`DUAL`·`SYSDATE`·`LEVEL` 같은 의사테이블은 
 - `import` — 파일/모듈 간 import 관계. 결정론적 인덱서는 **이 타입을 만들지 않는다**(파일 노드가 없는 순수 심볼 그래프라 `to`가 노드가 아니게 된다). Vue 추출기 등 파일 단위 관계를 내는 생성기만 쓴다
 - `reflect` — 리플렉션 가능성 (heuristic, 신뢰도 낮음). 인덱서는 만들지 않고 analyzer가 `_ai_patch.json`으로만 추가한다
 - `ui_event` · `markup_event` · `scheduler` · `process_entry` — 진입점에서 핸들러로 가는 관계. 출발점은 `trigger:<파일>#<트리거>` 형태의 합성 노드다
+- `dispatch` — 문자열 디스패치(`worker=`/`action=` 같은 파라미터로 서버 메서드를 고르는 호출)에서 해소된 화면 → 서버 메서드 관계. 출발점이 함수 밖 호출이면 `dispatch:<파일>:<줄>` 합성 id를 쓰며, 이 id는 현재 노드로 생성되지 않는다(알려진 한계)
 
 모든 레코드에는 `origin`(`deterministic-indexer` | `ai-enrichment` | `analyzer`)과 `confidence`(`HIGH`/`MEDIUM`/`LOW`)가 붙는다 — 어디서 온 사실인지 구분하기 위한 것이다.
 
@@ -304,6 +305,25 @@ FROM/JOIN 절의 `ROWNUM`·`DUAL`·`SYSDATE`·`LEVEL` 같은 의사테이블은 
 - `orm_mapping` — `@Entity` 클래스에서 역추출
 
 `row_count_estimate` 는 live_db 모드일 때만 채워짐.
+
+### DB 덤프(DDL·패키지 소스)에서 채워지는 객체
+
+결정론적 인덱서는 저장소(또는 `db_dump_paths`로 지정한 덤프 폴더)의 DDL·PL/SQL 소스에서 아래를 채운다. 모두 정규식 기반이라 `confidence`는 `MEDIUM`·`HIGH`이며, 동적 SQL(`EXECUTE IMMEDIATE` 변수)과 오버로드는 근사다.
+
+| 필드 | 내용 |
+|---|---|
+| `tables[]` | `CREATE TABLE`(오라클 꼬리절 `SEGMENT CREATION`·`STORAGE(...)`·`TABLESPACE`가 붙어도, `GLOBAL TEMPORARY` 포함). `schema`(접두사가 있을 때), `line`, 컬럼 `default` 추가 |
+| `views[]` | `{name, schema, materialized, tables[], file, line}` — `tables`는 뷰 본문이 읽는 테이블 |
+| `sequences[]` | `{name, start_with, increment_by, file, line}` |
+| `synonyms[]` | `{name, target, db_link?, public, file, line}` |
+| `procedures[]` · `functions[]` | 패키지 멤버·독립 단위. `{id, name, package, kind, implemented, file, spec_file?, line, tables_read[], tables_written[], calls[], called_by[], external_callers[]}`. `id`는 call_graph 노드 id와 같다. `external_callers`는 PL/SQL 밖(자바·JSP)의 호출자 |
+| `triggers[]` | `{id, name, table, events[], file, line, tables_read[], tables_written[], calls[]}` |
+
+`dialect`(`oracle`·`mssql`·`mysql`·`postgresql`)는 인덱서가 파일 내용에서 판별한 SQL 방언이다. 객체마다 달리고, `schema.json`의 `_meta.dialect`에는 하나뿐이면 그 값, 섞여 있으면 `mixed`가 들어간다. 분포는 `_meta.json`의 `db_source.dialects`에도 있다. 방언을 가릴 수 없는 `.sql`은 `oracle`로 읽는다(하위 호환).
+
+`implemented: false`는 패키지 스펙만 있고 본문이 덤프에 없다는 뜻이다 — 그 로직은 읽지 못했으니 추정하지 않는다. `_meta.source`는 **테이블**의 출처다(`ddl`·`derived-from-sql`·`source-objects`).
+
+`query-index.mjs schema --table T`는 이 필드로 `accessed_by`(그 테이블을 읽고 쓰는 프로시저·함수·트리거·뷰)를 함께 돌려준다. 이름은 스키마 접두사·따옴표·대소문자를 무시하고 마지막 구간을 정확히 비교한다.
 
 ---
 

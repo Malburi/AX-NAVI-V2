@@ -9,7 +9,7 @@
 | `symbols.json` | 클래스·메서드·함수 심볼과 위치 | `symbols[]` — `id`·`type`·`file`·`line`·`package`·`extends`·`implements`·`annotations`·`methods[]` | 인덱서 |
 | `call_graph.json` | 호출 관계 그래프 | `nodes[]`(`id`·`type`·`file`·`line`·`signature`·선택 `note`), `edges[]`(`from`·`to`·`type`·`file`·`line`·선택 `note`) | 인덱서. 모호 관계·note는 analyzer 패치 |
 | `sql_usage.json` | 어떤 쿼리를 어디서 실행하는가 | `sqls[]`(`id`·`type`·`tables`·`columns_selected`·`columns_where`·`text_preview`), `usages[]`(`sql_id`·`method`·`file`·`line`) | 인덱서 |
-| `schema.json` | 테이블·컬럼·PK/FK·인덱스 | `_meta.source`(`ddl`·`live_db`·`derived-from-sql` 등), `tables[]`(`columns`·`primary_key`·`foreign_keys`·`indexes`) | 인덱서(DDL 또는 SQL 유도). 라이브 DB는 analyzer |
+| `schema.json` | 테이블·컬럼·PK/FK·인덱스, 뷰·시퀀스·시노님, PL/SQL 프로시저·함수·트리거 | `_meta.source`(`ddl`·`live_db`·`derived-from-sql` 등), `tables[]`(`columns`·`primary_key`·`foreign_keys`·`indexes`), `views[]`·`sequences[]`·`synonyms[]`, `procedures[]`·`functions[]`·`triggers[]`(읽고 쓰는 테이블·호출 관계·외부 호출자) | 인덱서(DDL·PL/SQL 덤프 또는 SQL 유도). 라이브 DB는 analyzer |
 | `transactions.json` | 트랜잭션 경계 | `boundaries[]` — `entry_method`·`marker`·`propagation`·`methods_in_scope`·`external_io_calls` | 인덱서 |
 | `external_io.json` | 외부 통신 | `communications[]` — `type`(`http`·`kafka_*`·`file_io`·`redis` 등)·`target`·`in_transaction`·선택 `description` | 인덱서. description은 analyzer 패치 |
 | `env_branches.json` | 환경별 분기 코드·설정 | `profiles[]`, `branches[]`(`type`·`marker`·`values_per_profile`) | 인덱서 |
@@ -80,6 +80,7 @@
 | `import` | 파일·모듈 import. 인덱서는 만들지 않음 | Vue 추출기 등 파일 단위 생성기 |
 | `reflect` | 리플렉션 가능성(신뢰도 낮음) | analyzer 패치만 |
 | `ui_event`·`markup_event`·`scheduler`·`process_entry` | 진입점 → 핸들러. 출발점은 `trigger:<파일>#<트리거>` 합성 노드 | 인덱서 |
+| `dispatch` | 문자열 디스패치(`worker=`/`action=`)로 해소된 화면 → 서버 메서드. 함수 밖 호출은 `dispatch:<파일>:<줄>` 합성 id(노드 미생성, 알려진 한계) | 인덱서 |
 
 ## 스키마 검증
 

@@ -1,4 +1,5 @@
 import { basename, extname } from "node:path";
+import { detectSqlDialect } from "../index/sql_dialect.mjs";
 
 /*
  * 워크플로우와 에이전트는 기술 중립으로 유지하고, 소스 해석 차이는 이 레지스트리에 모은다.
@@ -14,7 +15,7 @@ export const ADAPTERS = [
   { id: "nexacro-form", label: "Nexacro Form", extensions: [".xfdl"], level: "PARTIAL" },
   { id: "python", label: "Python", extensions: [".py"], level: "FULL" },
   { id: "go", label: "Go", extensions: [".go"], level: "FULL" },
-  { id: "sql", label: "SQL/DDL", extensions: [".sql"], level: "FULL" },
+  { id: "sql", label: "SQL/DDL", extensions: [".sql", ".ddl"], level: "FULL" },
   /* 정규식 기반이라 오버로드·동적 SQL(EXECUTE IMMEDIATE 변수)·중첩 로컬 프로시저는 근사다. 변경은 READ(원문 확인). */
   { id: "plsql", label: "Oracle PL/SQL", extensions: [".pks", ".pkb", ".pck", ".spc", ".bdy", ".prc", ".fnc", ".trg", ".pls"], level: "PARTIAL" },
   /* C 함수·호출과 EXEC SQL 정적 SQL. 매크로·함수 포인터·전처리 분기는 해석하지 않는다. 변경은 READ(원문 확인). */
@@ -48,7 +49,11 @@ export function detectAdapters(rel, text = "") {
   if (/\bReact\b|from\s+["']react["']|\.(?:jsx|tsx)$/i.test(rel)) result.add("react");
   if (/<template\b|\bdefineComponent\b|\.(?:vue)$/i.test(rel)) result.add("vue");
   if (/struts|<action\b/i.test(text)) result.add("struts");
-  if (/\.sql$/i.test(rel) && /\bcreate\s+(?:or\s+replace\s+)?(?:(?:non)?editionable\s+)?(?:package|procedure|function|trigger)\b/i.test(text)) result.add("plsql");
+  if (/\.sql$/i.test(rel) && /\bcreate\s+(?:or\s+(?:replace|alter)\s+)?(?:definer\s*=\s*\S+\s+)?(?:(?:non)?editionable\s+)?(?:package|procedure|proc|function|trigger)\b/i.test(text)) {
+    /* 방언이 T-SQL·MySQL·PL/pgSQL 로 가려지면 그쪽 추출기를 쓴다. 가릴 수 없으면 예전대로 오라클(plsql)로 본다. */
+    if (["mssql", "mysql", "postgresql"].includes(detectSqlDialect(text, rel))) result.add("sql-routines");
+    else if (/\bcreate\s+(?:or\s+replace\s+)?(?:(?:non)?editionable\s+)?(?:package|procedure|function|trigger)\b/i.test(text)) result.add("plsql");
+  }
   return [...result];
 }
 
@@ -69,6 +74,9 @@ export function buildAdapterCoverage(facts, unsupportedFiles) {
     /* .sql 확장자는 FULL(DDL)이지만 안에 PL/SQL 프로그램 단위가 있으면 그 파일은 PL/SQL과 같은 PARTIAL이다. */
     if ((fact.adapters || []).includes("plsql") && /\.sql$/i.test(fact.rel)) {
       partialTargets.push({ path: fact.rel, level: "PARTIAL", reason: "PL/SQL program units (regex-based)" });
+    }
+    if ((fact.adapters || []).includes("sql-routines") && /\.sql$/i.test(fact.rel)) {
+      partialTargets.push({ path: fact.rel, level: "PARTIAL", reason: "T-SQL/MySQL/PL-pgSQL program units (regex-based)" });
     }
     if ((fact.adapters || []).includes("devexpress") || /\.Designer\.cs$/i.test(fact.rel)) {
       partialTargets.push({ path: fact.rel, level: "PARTIAL", reason: (fact.adapters || []).includes("devexpress") ? "DevExpress designer/component semantics" : "generated WinForms Designer semantics" });

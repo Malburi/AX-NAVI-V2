@@ -22,6 +22,7 @@ python "[plugin_root]/agents/lib/stack_precheck.py" --root "[root]"
 
 - `selected-paths`면 선택한 상대경로들을 `include_paths`에 넣는다. 인덱서가 그 밖의 소스는 읽지 않는다.
 - 모노레포면 모듈마다 `workspaces[]` 항목을 하나씩 두고 `stack`은 `00_stack_precheck.json`의 값을 쓴다.
+- **기존 `indexer-config.json`이 있으면 사용자가 넣은 키는 지우지 않고 보존한다**: `db_dump_paths`·`vendor_exclude`·`test_exclude`·`dispatch_rules`. 위 항목(`init_layout`·`include_paths`·`workspaces`)만 `00_init_scope.md` 값으로 갱신하고 나머지는 그대로 병합한다. 통째로 덮어쓰면 재초기화 때 덤프 경로 설정이 말없이 사라진다.
 
 ## Step C — 인덱싱
 
@@ -32,6 +33,15 @@ node "[plugin_root]/agents/lib/build-index.mjs" --root "[root]" --mode [mode] --
 `_workspace/index/`에 `symbols`·`call_graph`·`sql_usage`·`transactions`·`external_io`·`env_branches`·`schema`·`api_contract`·`dead_code`(해당 사실이 있는 것만) + `_meta.json`·`_analysis_input.json`·`_unresolved.jsonl`이 생성된다.
 
 기존 인덱스의 `_meta.generator`가 `deterministic-indexer`가 아니면 `--mode incremental` 대신 **`--mode init`을 강제**한다. 생성기마다 노드 id 체계가 달라 섞이면 한 파일에 두 개의 id 네임스페이스가 생긴다.
+
+### Step C.5 — DB 소스 현황 읽기
+
+`_workspace/index/_meta.json`에 `db_source`가 있으면 그 값을 **그대로** 반환에 옮긴다(인덱서가 센 결정론적 값이다 — 가공·추정 금지).
+오케스트레이터가 2-0.7 견적 화면과 Phase 3 보고에 쓴다. 없으면 반환에서 `db_source` 줄을 뺀다.
+
+- 옮길 것: `source_files`, `tables`·`views`·`packages`·`procedures`·`functions`·`triggers`, `undefined_procedures.count`, 그리고 `undefined_procedures.items`의 **상위 10개**(`name`·`callers`·`first_call`).
+- 오라클 전용 확장자(`.pks`·`.pkb`·`.prc`·`.fnc`·`.trg`·`.pls`·`.ddl` 등)는 설정 없이 읽는다. 덤프 폴더가 따로 있으면 `indexer-config.json`의 `db_dump_paths`(상대경로)를 **지우지 말고 유지**한다 — Step B에서 설정을 다시 쓸 때 기존 값을 보존한다.
+- 인덱스가 이미 있는 재실행이면 `--mode incremental`로 돌려 AI 판정 패치(`_ai_patch.json`)를 보존한다.
 
 ## Step D — 스택 보강 (해당 시)
 
@@ -96,6 +106,7 @@ node: [버전 또는 none] / python: [ok 또는 none]
 detected_stack: [값] / extractors: [목록]
 index_files: [생성된 파일명 목록]
 call_graph: nodes=[N] edges=[M] / symbols=[N]
+db_source: files=[N] tables=[N] views=[N] packages=[N] procedures=[N] functions=[N] triggers=[N] / undefined_procedures=[N] (상위: [이름:호출수, ...최대 10]) — 없으면 이 줄 생략
 ai_budget: initialized | skipped(node 없음)
 WARN: [없으면 "없음", 있으면 한 줄씩]
 ```

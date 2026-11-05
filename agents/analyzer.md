@@ -577,6 +577,15 @@ DB 접속 불가 시:
 
 산출물: `_workspace/index/schema.json`
 
+#### DB 소스(덤프)가 인덱스에 이미 있을 때
+
+`_analysis_input.json`에 `db_source`가 있고 `schema.json`의 `procedures`·`functions`·`triggers`가 채워져 있으면, 인덱서가 DDL·PL/SQL 소스에서 결정론적으로 만든 것이다. **`schema.json`을 다시 쓰지 않는다**(인덱서 소유 파일). 대신 분석 리포트에 **"DB 로직(프로시저·패키지)"** 절을 두고 아래를 옮긴다.
+
+- **읽은 범위:** `db_source`의 객체 수. `implemented: false`인 멤버(스펙만 있고 본문이 덤프에 없음)는 "본문 미확인"으로 따로 센다.
+- **업무 진입 경로:** `external_callers`가 있는 프로시저를 골라 `자바/JSP 호출자 → 프로시저 → 하위 호출 → 읽고 쓰는 테이블`(`tables_read`·`tables_written`) 한 줄씩. 호출·테이블 이름은 인덱스에 있는 값만 쓴다.
+- **판정·검증 로직:** 프로시저 본문을 **실제로 열어서** 읽은 조건(예: 정원·중복·자격 판정)만 `파일:줄` 근거와 함께 적는다. 열지 않은 본문의 내용을 이름이나 호출 관계로 추측해 쓰지 않는다.
+- **읽지 못한 로직:** `db_source.undefined_procedures`(자바·XML이 부르는데 소스가 없는 프로시저)를 호출 수 순으로 옮기고 "이 저장소만으로는 조건을 확정할 수 없음 — 덤프 필요"라고 명시한다. 도메인 문서의 Open Questions 후보다.
+
 **중요:** 운영 DB 직접 접속은 절대 자동 수행하지 않는다. 사용자가 명시적으로 connection string과 read-only 계정을 제공한 경우에만.
 
 ---
