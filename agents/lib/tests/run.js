@@ -13,6 +13,7 @@ import { test as registerAnalysisWikiTests } from "./analysis-wiki.test.mjs";
 import { test as registerSiteTests } from "./site.test.mjs";
 import { test as registerCoverageReportTests } from "./coverage-report.test.mjs";
 import { test as registerDispatchTests, testLargeFile as registerLargeFileTests } from "./dispatch.test.mjs";
+import { test as registerWriteGuardTests } from "./write-guard.test.mjs";
 
 const tests = [];
 function test(name, fn) {
@@ -43,6 +44,7 @@ await registerVerifyTargetTests(test, assert);
 await registerAnalysisWikiTests(test, assert);
 await registerSiteTests(test, assert);
 await registerCoverageReportTests(test, assert);
+await registerWriteGuardTests(test, assert);
 
 let passed = 0,
   failed = 0;

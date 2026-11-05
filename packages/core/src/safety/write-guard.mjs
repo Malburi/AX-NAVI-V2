@@ -215,11 +215,31 @@ export function shellWrites(command, opts) {
     if (p) out.targets.push(p);
     else out.unknown.push(`경로를 풀 수 없는 쓰기 대상 ${raw}`);
   };
+  /*
+   * 같은 명령 안의 단순 대입(`P="<플러그인 경로>"; python "$P/agents/lib/x.py"`)은 기억했다가 푼다.
+   * 에이전트가 플러그인 경로를 변수에 담아 부르면 `$P` 를 풀지 못해 자기 스크립트까지 "대상 모름" 으로 물었다.
+   */
+  /** @type {Map<string, string>} */
+  const vars = new Map();
+  /** @param {string} s */
+  const expand = (s) => s.replace(/\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)/g, (m, a, b) => vars.get(a ?? b) ?? m);
   for (const seg of splitShell(command).segments) {
+    seg.words = seg.words.map(expand);
+    seg.redirects = seg.redirects.map(expand);
     for (const r of seg.redirects) target(r);
     let at = 0;
     const w = seg.words;
+    if (w[0] === "export") at = 1;
     while (at < w.length && /^[A-Za-z_]\w*=/.test(w[at] ?? "")) at += 1;
+    if (at >= w.length) {
+      /* 대입만 있는 말. 값에 풀지 못한 변수·명령 치환이 남으면 기억하지 않는다 — 모르는 채로 둬야 보수적이다. */
+      for (const a of w.slice(w[0] === "export" ? 1 : 0)) {
+        const [, name = "", value = ""] = /^([A-Za-z_]\w*)=(.*)$/s.exec(a) ?? [];
+        if (/[$`]/.test(value)) vars.delete(name);
+        else vars.set(name, value);
+      }
+      continue;
+    }
     while (["do", "then", "else", "elif", "if", "while", "until", "!", "{", "sudo", "nohup", "time", "command", "exec"].includes(w[at] ?? "")) at += 1;
     if (at >= w.length) continue;
     const prog = programOf(w[at] ?? "");
