@@ -1,6 +1,6 @@
 ---
 name: plan-migration
-description: 스택 마이그레이션 계획을 수립한다(인벤토리, 매핑 테이블, 단계별 계획, 위험 등록, 테스트 전략, 롤백, 체크포인트). "마이그레이션 계획", "migration plan", "Spring Boot로 마이그레이션", "Struts → Spring", "iBatis → MyBatis", "Oracle → PostgreSQL", ".NET Core로 옮겨야 해", "Java 17 업그레이드", "JSP를 React로", "AngularJS → Angular", "마이그레이션 로드맵", "전환 계획", "리프트앤시프트" 요청 시 트리거. 축약 호출: "마이그 [현재 → 목표]".
+description: '스택 마이그레이션 계획을 수립한다(인벤토리, 매핑 테이블, 단계별 계획, 위험 등록, 테스트 전략, 롤백, 체크포인트). "마이그레이션 계획", "migration plan", "Spring Boot로 마이그레이션", "Struts → Spring", "iBatis → MyBatis", "Oracle → PostgreSQL", ".NET Core로 옮겨야 해", "Java 17 업그레이드", "JSP를 React로", "AngularJS → Angular", "마이그레이션 로드맵", "전환 계획", "리프트앤시프트" 요청 시 트리거. 축약 호출: "마이그 [현재 → 목표]".'
 ---
 
 # Plan Migration (오케스트레이터)

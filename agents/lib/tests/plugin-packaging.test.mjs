@@ -83,4 +83,19 @@ export async function test(register, assert) {
       assert.ok(frontmatterField(text, "description"), `에이전트 description 누락: ${file}`);
     }
   });
+
+  register("스킬과 에이전트 frontmatter 값에 따옴표 없는 `: `가 없다 (Claude Code 가 frontmatter 를 통째로 버린다)", () => {
+    const files = [
+      ...readdirSync(join(root, "agents")).filter((name) => name.endsWith(".md")).map((name) => join(root, "agents", name)),
+      ...readdirSync(join(root, "skills")).map((name) => join(root, "skills", name, "SKILL.md")),
+    ];
+    for (const file of files) {
+      const frontmatter = read(file).replace(/\r\n/g, "\n").match(/^---\n([\s\S]*?)\n---/)?.[1] || "";
+      for (const line of frontmatter.split("\n")) {
+        const value = /^[A-Za-z_][\w-]*:\s?(.*)$/.exec(line)?.[1];
+        if (value === undefined || /^['"]/.test(value)) continue;
+        assert.ok(!/:\s/.test(value), `${file}: 값에 ': '가 있으면 따옴표로 감싼다 — ${line.slice(0, 60)}`);
+      }
+    }
+  });
 }

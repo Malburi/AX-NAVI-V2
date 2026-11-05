@@ -1,6 +1,6 @@
 ---
 name: flow
-description: 처리 흐름 추적 단축 호출(별칭). "/flow [기능·API·화면]" 요청 시 ax-navi:trace-logic(진입점부터 DB/외부 시스템까지 흐름 추적)으로 위임한다. (trace가 아닌 flow로 명명한 이유: 하네스가 프로젝트마다 로컬 trace 스킬을 배포하므로 이름 충돌 방지)
+description: '처리 흐름 추적 단축 호출(별칭). "/flow [기능·API·화면]" 요청 시 ax-navi:trace-logic(진입점부터 DB/외부 시스템까지 흐름 추적)으로 위임한다. (trace가 아닌 flow로 명명한 이유: 하네스가 프로젝트마다 로컬 trace 스킬을 배포하므로 이름 충돌 방지)'
 ---
 
 # /flow — trace-logic 별칭
