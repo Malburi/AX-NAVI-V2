@@ -30,6 +30,29 @@
 | `kind` / `stack` | 문자열 | `"unknown"` | `workspaces`가 없을 때 기본 `root` 워크스페이스에 쓰는 값 |
 | `vendor_exclude` | 불리언 | 켜짐 | `false`를 두면 벤더·미니파이 소스 제외를 전부 끔 |
 | `test_exclude` | 불리언 | 켜짐 | `false`를 두면 테스트 디렉터리·테스트 파일명 제외를 끔 |
+| `db_dump_paths[]` | 배열 | `[]` | DB 덤프(DDL·패키지·프로시저 소스)가 든 폴더의 상대경로. 이 폴더는 `include_paths`·벤더·테스트 제외와 무관하게 읽고, 파일당 크기 상한이 4MB에서 32MB로 넓어짐. 루트 밖·절대경로는 버림 |
+
+**DB 덤프 넣는 법.** 업무 로직이 오라클 패키지·프로시저에 있는 시스템은 소스 저장소만으로는 분석이 끊긴다. 덤프를 프로젝트 안(예: `db/dump/`)에 두고 `"db_dump_paths": ["db/dump"]`를 설정한다.
+
+- **DDL만으로는 부족하다.** 테이블 DDL 외에 패키지 스펙+바디(`.pks`·`.pkb`) 소스가 있어야 프로시저가 읽고 쓰는 테이블과 호출 관계가 잡힌다. `DBMS_METADATA.GET_DDL` 또는 `ALL_SOURCE`(PACKAGE·PACKAGE BODY·PROCEDURE·FUNCTION·TRIGGER)로 뽑는다.
+- **객체별로 나눠 받는 편이 좋다.** 한 파일이 32MB를 넘으면 `_meta.excluded_sources`에 `too-large`로 기록되고 읽지 않는다(4MB 초과 파일은 설정이 없어도 같은 방식으로 기록). 큰 파일일수록 인덱싱이 선형보다 느리게 늘어난다(실측: 5.6MB 약 4초, 18MB 약 24초).
+- **데이터 행은 넣지 않는다.** 구조와 소스만 읽는다. 개인정보가 든 INSERT 덤프는 제외한다.
+- **확장자.** `.sql`·`.ddl`(DDL), `.pks`·`.pkb`·`.pck`·`.spc`·`.bdy`·`.prc`·`.fnc`·`.trg`·`.pls`(PL/SQL). 이 중 `.ddl`과 PL/SQL 전용 확장자는 **`db_dump_paths` 없이도** 벤더·테스트 제외와 4MB 상한에서 풀려 읽힌다. `.sql`은 마이그레이션·테스트 스크립트일 수도 있어, 제외 폴더나 큰 파일은 `db_dump_paths`로 지정할 때만 풀린다.
+- **무엇이 읽혔나.** 인덱싱 결과 `_meta.json`의 `db_source`에 읽은 객체 수(테이블·뷰·패키지·프로시저·함수·트리거)와 `undefined_procedures`(자바·XML이 부르는데 소스가 없는 프로시저, 호출 많은 순)가 남는다. harness-init은 이를 견적 화면과 최종 보고에 보여 주고, 어떤 프로시저 소스를 내보내야 하는지 알려 준다.
+- **하네스 재초기화.** `indexer-config.json`의 `db_dump_paths`·`vendor_exclude`·`test_exclude`·`dispatch_rules`는 보존된다. 덤프를 추가한 뒤에는 `--mode init`이 아니라 `incremental`("인덱스만 갱신해줘")로 반영한다.
+
+### 지원하는 DB 방언
+
+방언은 **설정 없이** 파일 내용에서 판별한다(`_meta.json`의 `db_source.dialects`, `schema.json`의 `_meta.dialect`·객체별 `dialect`). 판별할 수 없는 `.sql`은 예전처럼 Oracle로 읽는다.
+
+| DB | 테이블·뷰·시퀀스·시노님·인덱스 | 프로시저·함수·트리거 | 호출로 인식하는 모양 | 덤프에서 알아 두기 |
+|---|---|---|---|---|
+| Oracle | 지원(`DBMS_METADATA` 꼬리절 포함) | 지원(패키지 스펙+바디 포함) | `{call PKG.PROC}` · `begin PKG.PROC; end;` · PL/SQL 본문의 `PKG.PROC(` | 확장자 `.pks`·`.pkb`·`.prc`·`.fnc`·`.trg` |
+| MSSQL | 지원(`[dbo].[x]`·`CLUSTERED`·`WITH CHECK ADD`·`GO`) | 지원(`CREATE PROCEDURE`·`FUNCTION`·`TRIGGER ... ON t AFTER ...`) | `EXEC [dbo].[usp_x] @a` · 자바의 `EXEC usp_x ?` | `GO`로 구분된 `.sql`. 가상 테이블 `inserted`·`deleted`는 제외 |
+| MySQL / MariaDB | 지원(백틱·`ENGINE=`·인라인 `KEY`·`/*!50001 */` 뷰) | 지원(`DELIMITER`·`/*!50003 */`로 감싼 `mysqldump` 출력) | `CALL proc(...)` | `mysqldump --routines --triggers --no-data` 출력 |
+| PostgreSQL | 지원(`character varying`·`ALTER TABLE ONLY`·`USING btree`) | 지원(`$$ ... $$` 본문, `EXECUTE FUNCTION` 트리거) | `PERFORM fn(...)` · `CALL proc(...)` · 자바의 `{? = call fn(?)}` | `pg_dump --schema-only` 출력 |
+
+한계(전 방언 공통): 동적 SQL(`EXEC(@sql)`·`EXECUTE format(...)`·`EXECUTE IMMEDIATE 변수`)과 오버로드는 따라가지 않는다. PostgreSQL의 `SELECT fn(...)`은 내장 함수와 구분할 수 없어 호출로 잡지 않는다. 정규식 기반의 근사이며, 실제 DB가 낸 덤프가 아니라 각 도구가 내는 형식을 따른 픽스처로 검증했다.
 
 `init_layout`을 지정하지 않으면 `workspace_mode`가 `true`일 때 `monorepo`, `include_paths`에 비어 있지 않은 값이 있으면 `selected-paths`, 그 외에는 `single-root`로 유추합니다. `hub-roots`는 harness-init의 구성 이름이지만 인덱서 설정에서는 허용 값이 아니므로 유추 규칙을 탑니다.
 

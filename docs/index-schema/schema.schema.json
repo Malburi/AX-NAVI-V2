@@ -55,9 +55,215 @@
         }
       }
     },
-    "views": { "type": "array" },
-    "procedures": { "type": "array" },
-    "functions": { "type": "array" },
-    "triggers": { "type": "array" }
+    "views": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["name"],
+        "properties": {
+          "name": { "type": "string" }, "schema": { "type": "string" }, "materialized": { "type": "boolean" },
+          "tables": { "type": "array", "items": { "type": "string" }, "description": "뷰 본문이 읽는 테이블(FROM/JOIN)" },
+          "file": { "type": "string" }, "line": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "sequences": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["name"],
+        "properties": { "name": { "type": "string" }, "start_with": { "type": ["string", "null"] }, "increment_by": { "type": ["string", "null"] }, "file": { "type": "string" }, "line": { "type": ["integer", "null"] } }
+      }
+    },
+    "synonyms": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["name", "target"],
+        "properties": { "name": { "type": "string" }, "target": { "type": "string" }, "db_link": { "type": "string" }, "public": { "type": "boolean" }, "file": { "type": "string" }, "line": { "type": ["integer", "null"] } }
+      }
+    },
+    "procedures": { "type": "array", "items": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "dialect": { "type": "string", "enum": ["oracle", "mssql", "mysql", "postgresql"] },
+        "package": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "소속 패키지. 단독 프로시저·함수면 null"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "procedure",
+            "function",
+            "unknown"
+          ]
+        },
+        "implemented": {
+          "type": "boolean",
+          "description": "본문이 덤프에 있는가. false면 스펙만 있어 로직을 읽지 못했다"
+        },
+        "visibility": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "spec_file": {
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tables_read": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tables_written": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "이 단위가 부르는 다른 PL/SQL 단위"
+        },
+        "called_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "이 단위를 부르는 다른 PL/SQL 단위"
+        },
+        "external_callers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "이 단위를 부르는 PL/SQL 밖(자바·JSP 등)의 호출자"
+        }
+      }
+    } },
+    "functions": { "type": "array", "items": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "dialect": { "type": "string", "enum": ["oracle", "mssql", "mysql", "postgresql"] },
+        "package": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "소속 패키지. 단독 프로시저·함수면 null"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "procedure",
+            "function",
+            "unknown"
+          ]
+        },
+        "implemented": {
+          "type": "boolean",
+          "description": "본문이 덤프에 있는가. false면 스펙만 있어 로직을 읽지 못했다"
+        },
+        "visibility": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "spec_file": {
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tables_read": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tables_written": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "calls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "이 단위가 부르는 다른 PL/SQL 단위"
+        },
+        "called_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "이 단위를 부르는 다른 PL/SQL 단위"
+        },
+        "external_callers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "이 단위를 부르는 PL/SQL 밖(자바·JSP 등)의 호출자"
+        }
+      }
+    } },
+    "triggers": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["name"],
+        "properties": {
+          "id": { "type": "string" }, "name": { "type": "string" }, "schema": { "type": "string" }, "dialect": { "type": "string", "enum": ["oracle", "mssql", "mysql", "postgresql"] },
+          "table": { "type": ["string", "null"], "description": "트리거가 걸린 테이블" },
+          "events": { "type": "array", "items": { "type": "string" } },
+          "file": { "type": "string" }, "line": { "type": ["integer", "null"] },
+          "tables_read": { "type": "array", "items": { "type": "string" } },
+          "tables_written": { "type": "array", "items": { "type": "string" } },
+          "calls": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
   }
 }

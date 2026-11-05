@@ -1,9 +1,14 @@
 ﻿import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { applyAiPatch, buildIndex } from "../build-index.mjs";
 import { assessTargetCoverage } from "../adapters/registry.mjs";
 import { COMMANDS } from "../query-index.mjs";
+import { validateHarness } from "../validate-harness.mjs";
+
+// agents/lib/tests/build-index.test.mjs -> dirname 4회(tests->lib->agents->루트)
+const PLUGIN_ROOT = dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))));
 
 function write(root, rel, content) {
   const path = join(root, rel);
@@ -2456,6 +2461,586 @@ public class OrderDao {
       assert.equal(coverage.extensions.find((item) => item.extension === ".pkb")?.level, "PARTIAL");
       assert.ok(!coverage.unsupported_files.some((file) => file.endsWith(".pkb")), "더 이상 discovery-only가 아니다");
       assert.equal(assessTargetCoverage(coverage, "db/install.sql").decision, "READ", "PL/SQL이 든 .sql은 원문 확인 후 진행(READ)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 4MB를 넘는 파일(예: 객체가 한 파일에 몰린 DB 덤프)이 인덱스에서 조용히 사라지던 문제.
+   * 빠지더라도 _meta.excluded_sources에 사유가 남아야 "왜 인덱스에 없지"를 추적할 수 있다.
+   */
+  register("4MB 초과 파일은 인덱싱하지 않되 제외 사유(too-large)를 기록한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/dump/all_objects.sql", "-- filler line for size\n".repeat(190000));
+      write(root, "src/App.js", "function appMain(){ return 1; }\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const excluded = json(root, "_meta.json").excluded_sources;
+      assert.equal(excluded.by_reason["too-large"], 1, JSON.stringify(excluded));
+      assert.ok(excluded.files.some((f) => f.startsWith("db/dump/all_objects.sql (too-large)")), JSON.stringify(excluded.files));
+      assert.ok(json(root, "symbols.json").symbols.some((item) => item.id.includes("appMain")), "나머지 소스는 정상 인덱싱");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * init 재인덱싱이 _ai_patch.json을 말없이 지워 analyzer(LLM)의 판정이 사라지던 문제(실측 2026-11-05).
+   * 지우지 않고 _ai_patch.prev.json으로 보존하고, incremental은 기존대로 그 자리에서 유지한다.
+   */
+  register("init 재인덱싱은 _ai_patch.json을 지우지 않고 _ai_patch.prev.json으로 보존한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "src/App.js", "function appMain(){ return helper(); }\nfunction helper(){ return 1; }\n");
+      const patchPath = join(root, "_workspace", "index", "_ai_patch.json");
+      const prevPath = join(root, "_workspace", "index", "_ai_patch.prev.json");
+      const patchText = JSON.stringify({ version: 1, operations: [] });
+
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      write(root, "_workspace/index/_ai_patch.json", patchText);
+
+      buildIndex({ root, mode: "incremental", tier: "Standard", config: null });
+      assert.ok(existsSync(patchPath), "incremental은 패치를 그대로 둔다");
+      assert.ok(!existsSync(prevPath), "incremental은 백업을 만들지 않는다");
+
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      assert.ok(!existsSync(patchPath), "init은 이전 패치를 적용하지 않는다");
+      assert.ok(existsSync(prevPath), "init은 패치를 삭제하지 않고 보존한다");
+      assert.equal(readFileSync(prevPath, "utf8"), patchText, "보존된 내용이 원본과 같다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 인덱서가 만드는 dispatch 엣지를 call_graph 스키마 enum이 허용하지 않아, 디스패치 규칙이 있는 모든 프로젝트가
+   * validate-harness에서 PLUGIN_INDEX_CONTRACT로 실패하던 문제(실측 2026-11-05: 68건).
+   */
+  register("dispatch 엣지가 있는 인덱스는 플러그인 계약(스키마) 검증을 통과한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "WEB-INF/web.xml", `<web-app><servlet><servlet-name>ajax</servlet-name><servlet-class>acme.frame.servlet.AjaxController</servlet-class></servlet>
+<servlet-mapping><servlet-name>ajax</servlet-name><url-pattern>/TransData.do</url-pattern></servlet-mapping></web-app>`);
+      write(root, "WEB-INF/config/app-common.xml", `<beans><bean id="CategoryService" class="acme.lms.service.CategoryService"/></beans>`);
+      write(root, "WEB-INF/src/acme/lms/service/CategoryService.java", `package acme.lms.service;
+public class CategoryService extends BaseService {
+  public DataSet doListChildren(Parameter param) throws SQLException {
+    DataSet dataSet = createDataSet();
+    dataSet.set("rtList", createDataAccesser(null).query("CATEGORY_CHILD_S01", "x"));
+    return dataSet;
+  }
+}
+`);
+      write(root, "WEB-INF/jsp/back/task/checkList.jsp", `<%@ page contentType="text/html; charset=UTF-8" %>
+<script>
+function onInitAjax() {
+  $.ajax({ type: "POST", url: CONTEXT_PATH + "/TransData.do", dataType: "html",
+    data: "worker=CategoryService&action=listChildren&no=" + no, success: onResult });
+}
+function onResult(request) { var data = transData(request); $('#n').val(data.rtList[1][1]); }
+</script>`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const graph = json(root, "call_graph.json");
+      assert.ok(graph.edges.some((edge) => edge.type === "dispatch"), `dispatch 엣지가 만들어져야 검증 의미가 있다: ${JSON.stringify(graph.edges.map((e) => e.type))}`);
+      const result = validateHarness({ root, pluginRoot: PLUGIN_ROOT });
+      const contract = result.checks.filter((item) => item.code === "PLUGIN_INDEX_CONTRACT");
+      assert.equal(contract.length, 0, JSON.stringify(contract.slice(0, 3)));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 오라클 DBMS_METADATA.GET_DDL 출력은 닫는 괄호 뒤에 SEGMENT/STORAGE/TABLESPACE 꼬리절이 붙는다.
+   * 예전 CREATE TABLE 정규식(`\)\s*;`)은 이 모양에 하나도 걸리지 않아 덤프한 DDL의 테이블이 통째로 사라졌다(실측 2026-11-05).
+   */
+  register("오라클 DDL 덤프의 CREATE TABLE을 꼬리절이 붙어도 컬럼·PK·기본값·인덱스까지 읽는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/dump/tables.sql", `
+  CREATE TABLE "HRD"."TB_ENROLL"
+   (\t"ENROLL_NO" NUMBER(10,0) NOT NULL ENABLE,
+\t"MEMBER_ID" VARCHAR2(20 BYTE) NOT NULL ENABLE,
+\t"STATUS" VARCHAR2(2 BYTE) DEFAULT 'A',
+\t"REG_DT" DATE DEFAULT SYSDATE,
+\t CONSTRAINT "PK_TB_ENROLL" PRIMARY KEY ("ENROLL_NO")
+  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "USERS"  ENABLE
+   ) SEGMENT CREATION IMMEDIATE
+  PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255 NOCOMPRESS LOGGING
+  STORAGE(INITIAL 65536 NEXT 1048576 MINEXTENTS 1 MAXEXTENTS 2147483645
+  PCTINCREASE 0 FREELISTS 1 FREELIST GROUPS 1 BUFFER_POOL DEFAULT FLASH_CACHE DEFAULT CELL_FLASH_CACHE DEFAULT)
+  TABLESPACE "USERS" ;
+
+  -- it's a comment with an apostrophe that must not unbalance anything
+  CREATE TABLE "HRD"."TB_COURSE"
+   (\t"COURSE_CD" VARCHAR2(10 BYTE) NOT NULL ENABLE,
+\t"PRICE" NUMBER(12,2) DEFAULT 0,
+\t CONSTRAINT "PK_TB_COURSE" PRIMARY KEY ("COURSE_CD") USING INDEX TABLESPACE "USERS"  ENABLE
+   ) SEGMENT CREATION IMMEDIATE TABLESPACE "USERS" ;
+
+  CREATE GLOBAL TEMPORARY TABLE "HRD"."TMP_WORK" (\t"ENROLL_NO" NUMBER ) ON COMMIT PRESERVE ROWS ;
+
+  CREATE UNIQUE INDEX "HRD"."UX_ENROLL_MEMBER" ON "HRD"."TB_ENROLL" ("MEMBER_ID", "STATUS") PCTFREE 10 TABLESPACE "USERS" ;
+
+  ALTER TABLE "HRD"."TB_ENROLL" ADD CONSTRAINT "FK_ENROLL_COURSE" FOREIGN KEY ("MEMBER_ID") REFERENCES "HRD"."TB_COURSE" ("COURSE_CD") ENABLE;
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.source, "ddl", JSON.stringify(schema._meta));
+      const byName = Object.fromEntries(schema.tables.map((table) => [table.name, table]));
+      assert.equal(Object.keys(byName).sort().join(","), "HRD.TB_COURSE,HRD.TB_ENROLL,HRD.TMP_WORK", Object.keys(byName).join(","));
+      const enroll = byName["HRD.TB_ENROLL"];
+      assert.equal(enroll.schema, "HRD");
+      assert.equal(enroll.columns.map((column) => column.name).join(","), "ENROLL_NO,MEMBER_ID,STATUS,REG_DT");
+      assert.equal(enroll.primary_key.join(","), "ENROLL_NO");
+      assert.equal(enroll.columns.find((column) => column.name === "STATUS").default, "'A'");
+      assert.equal(enroll.columns.find((column) => column.name === "REG_DT").default, "SYSDATE");
+      assert.equal(enroll.columns.find((column) => column.name === "MEMBER_ID").nullable, false);
+      assert.equal(enroll.indexes.length, 1, "스키마가 붙은 인덱스 이름");
+      assert.equal(enroll.indexes[0].name, "UX_ENROLL_MEMBER");
+      assert.equal(enroll.indexes[0].unique, true);
+      assert.equal(byName["HRD.TB_COURSE"].columns.length, 2, "앞 테이블의 꼬리절이 뒤 테이블을 삼키지 않는다");
+      assert.equal(enroll.foreign_keys.length, 1, "ALTER TABLE FK");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("뷰·시퀀스·시노님을 schema.json에 담고 뷰는 의존 테이블을 남긴다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/objects.ddl", `
+CREATE TABLE TB_ENROLL (ENROLL_NO NUMBER, MEMBER_ID VARCHAR2(20));
+CREATE TABLE TB_COURSE (COURSE_CD VARCHAR2(10));
+CREATE OR REPLACE FORCE VIEW "HRD"."V_ENROLL_SUMMARY" ("MEMBER_ID", "CNT") AS
+  SELECT E.MEMBER_ID, COUNT(*) AS CNT FROM TB_ENROLL E JOIN TB_COURSE C ON C.COURSE_CD = E.MEMBER_ID GROUP BY E.MEMBER_ID;
+CREATE MATERIALIZED VIEW MV_COURSE AS SELECT COURSE_CD FROM TB_COURSE;
+CREATE SEQUENCE "HRD"."SEQ_ENROLL" MINVALUE 1 MAXVALUE 9999999999 INCREMENT BY 5 START WITH 100 CACHE 20 NOORDER NOCYCLE ;
+CREATE OR REPLACE PUBLIC SYNONYM "ENROLL" FOR "HRD"."TB_ENROLL";
+CREATE SYNONYM REMOTE_T FOR HRD.TB_COURSE@PROD_LINK;
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema.tables.length, 2, ".ddl 확장자도 DDL로 읽는다");
+      const view = schema.views.find((item) => item.name === "HRD.V_ENROLL_SUMMARY");
+      assert.ok(view, JSON.stringify(schema.views));
+      assert.equal([...view.tables].sort().join(","), "TB_COURSE,TB_ENROLL");
+      assert.equal(view.materialized, false);
+      assert.equal(schema.views.find((item) => item.name === "MV_COURSE")?.materialized, true);
+      const sequence = schema.sequences.find((item) => item.name === "HRD.SEQ_ENROLL");
+      assert.equal(`${sequence.start_with}/${sequence.increment_by}`, "100/5");
+      const synonym = schema.synonyms.find((item) => item.name === "ENROLL");
+      assert.equal(`${synonym.target}|${synonym.public}`, "HRD.TB_ENROLL|true");
+      const remote = schema.synonyms.find((item) => item.name === "REMOTE_T");
+      assert.equal(`${remote.target}|${remote.db_link}`, "HRD.TB_COURSE|PROD_LINK");
+      const result = validateHarness({ root, pluginRoot: PLUGIN_ROOT });
+      assert.equal(result.checks.filter((item) => item.level === "FAIL" && /schema/i.test(item.message)).length, 0, JSON.stringify(result.checks.filter((item) => item.level === "FAIL").slice(0, 3)));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 파서가 이미 만든 패키지·트리거 노드, 본문 SQL 사용처, 호출 엣지를 schema.json 한 곳에 모은다.
+   * "이 테이블을 바꾸면 어느 프로시저가 영향받나", "이 프로시저를 누가 부르나(자바 포함)"가 한 번에 나와야 한다.
+   */
+  register("PL/SQL 프로시저·함수·트리거를 읽고 쓰는 테이블·호출 관계·외부 호출자와 함께 schema.json에 담는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/PKG_ENROLL.pks", `CREATE OR REPLACE PACKAGE HRD.PKG_ENROLL AS
+  PROCEDURE ENROLL(p_member VARCHAR2);
+  FUNCTION IS_FULL(p_course VARCHAR2) RETURN NUMBER;
+END PKG_ENROLL;
+/
+`);
+      write(root, "db/PKG_ENROLL.pkb", `CREATE OR REPLACE PACKAGE BODY HRD.PKG_ENROLL AS
+  PROCEDURE ENROLL(p_member VARCHAR2) IS
+  BEGIN
+    IF IS_FULL('X') = 1 THEN RETURN; END IF;
+    INSERT INTO TB_ENROLL (MEMBER_ID) VALUES (p_member);
+  END ENROLL;
+
+  FUNCTION IS_FULL(p_course VARCHAR2) RETURN NUMBER IS
+    v_cnt NUMBER;
+  BEGIN
+    SELECT COUNT(*) INTO v_cnt FROM TB_ENROLL E, TB_COURSE C WHERE C.COURSE_CD = p_course;
+    RETURN v_cnt;
+  END IS_FULL;
+END PKG_ENROLL;
+/
+`);
+      write(root, "db/PKG_ONLY_SPEC.pks", `CREATE OR REPLACE PACKAGE HRD.PKG_ONLY_SPEC AS
+  PROCEDURE LOST_LOGIC(p_id NUMBER);
+END PKG_ONLY_SPEC;
+/
+`);
+      write(root, "db/PROC_CLEANUP.prc", `CREATE OR REPLACE PROCEDURE HRD.PROC_CLEANUP IS
+BEGIN
+  DELETE FROM TB_ENROLL_LOG WHERE 1 = 1;
+END;
+/
+`);
+      write(root, "db/TRG_ENROLL_AUDIT.trg", `CREATE OR REPLACE TRIGGER HRD.TRG_ENROLL_AUDIT
+AFTER INSERT OR UPDATE ON HRD.TB_ENROLL
+FOR EACH ROW
+BEGIN
+  INSERT INTO TB_ENROLL_LOG (ENROLL_NO) VALUES (:NEW.ENROLL_NO);
+END;
+/
+`);
+      write(root, "src/EnrollService.java", `package acme.lms;
+public class EnrollService {
+  public void doEnroll(Parameter p) {
+    CallableStatement cs = conn.prepareCall("{call HRD.PKG_ENROLL.ENROLL(?)}");
+  }
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.source, "derived-from-sql", "_meta.source는 테이블의 출처다 — DDL이 없고 본문 SQL에서 유도한 테이블뿐");
+
+      const enroll = schema.procedures.find((item) => item.id === "PKG_ENROLL.ENROLL");
+      assert.ok(enroll, JSON.stringify(schema.procedures.map((item) => item.id)));
+      assert.equal(enroll.kind, "procedure");
+      assert.equal(enroll.package, "PKG_ENROLL");
+      assert.equal(enroll.implemented, true);
+      assert.equal(enroll.file, "db/PKG_ENROLL.pkb", "본문 파일이 file");
+      assert.equal(enroll.spec_file, "db/PKG_ENROLL.pks");
+      assert.equal(enroll.tables_written.join(","), "TB_ENROLL");
+      assert.equal(enroll.calls.join(","), "PKG_ENROLL.IS_FULL");
+      assert.equal(enroll.external_callers.join(","), "acme.lms.EnrollService.doEnroll", "자바 호출자");
+
+      const isFull = schema.functions.find((item) => item.id === "PKG_ENROLL.IS_FULL");
+      assert.equal(isFull.kind, "function");
+      assert.equal([...isFull.tables_read].sort().join(","), "TB_COURSE,TB_ENROLL");
+      assert.equal(isFull.called_by.join(","), "PKG_ENROLL.ENROLL");
+
+      const specOnly = schema.procedures.find((item) => item.id === "PKG_ONLY_SPEC.LOST_LOGIC");
+      assert.equal(specOnly.implemented, false, "본문이 덤프에 없으면 읽지 못했다고 표시");
+
+      const standalone = schema.procedures.find((item) => item.id === "PROC_CLEANUP");
+      assert.equal(standalone.package, null);
+      assert.equal(standalone.tables_written.join(","), "TB_ENROLL_LOG");
+
+      const trigger = schema.triggers.find((item) => item.id === "TRG_ENROLL_AUDIT");
+      assert.equal(trigger.table, "TB_ENROLL");
+      assert.equal(trigger.events.join(","), "INSERT,UPDATE");
+      assert.equal(trigger.tables_written.join(","), "TB_ENROLL_LOG");
+
+      const result = validateHarness({ root, pluginRoot: PLUGIN_ROOT });
+      const contract = result.checks.filter((item) => item.level === "FAIL");
+      assert.equal(contract.length, 0, JSON.stringify(contract.slice(0, 3)));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * db_dump_paths — 덤프는 보통 test·build·vendor 같은 이름의 폴더나 4MB를 넘는 한 파일로 온다.
+   * 그 폴더만큼은 제외 규칙과 크기 상한에서 풀어 준다. 설정이 없으면 예전과 같이 제외·기록된다.
+   */
+  register("db_dump_paths 폴더는 테스트·벤더 제외와 4MB 상한에서 풀어 읽는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      // .sql 로 둔다 — .pkb 같은 오라클 전용 확장자는 설정 없이도 덤프로 취급되어 제외되지 않는다(아래 db_source 테스트)
+      write(root, "test/oracle/PKG_T.sql", `CREATE OR REPLACE PACKAGE BODY PKG_T AS
+  PROCEDURE RUN_T IS BEGIN DELETE FROM TB_T; END RUN_T;
+END PKG_T;
+/
+`);
+      // 4MB를 넘는 한 파일 덤프 — 앞은 채움 줄, 끝에 실제 테이블 하나
+      write(root, "test/oracle/big.sql", "-- filler line for size padding\n".repeat(140000) + `CREATE TABLE "HRD"."TB_BIG" ("ID" NUMBER NOT NULL, CONSTRAINT "PK_BIG" PRIMARY KEY ("ID")) TABLESPACE "USERS";\n`);
+      write(root, "src/App.js", "function appMain(){ return 1; }\n");
+
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      let excluded = json(root, "_meta.json").excluded_sources;
+      assert.ok(excluded.by_reason["too-large"] >= 1, `설정 없이는 상한에 걸린다: ${JSON.stringify(excluded.by_reason)}`);
+      assert.ok(!json(root, "symbols.json").symbols.some((item) => item.id === "PKG_T"), "설정 없이는 test 폴더가 제외된다");
+
+      write(root, "_workspace/indexer-config.json", JSON.stringify({ db_dump_paths: ["test/oracle", "../outside", "/abs/path"] }));
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      excluded = json(root, "_meta.json").excluded_sources;
+      assert.ok(!excluded.by_reason["too-large"], JSON.stringify(excluded.by_reason));
+      assert.ok(json(root, "symbols.json").symbols.some((item) => item.id === "PKG_T"), "덤프 폴더는 test 제외를 받지 않는다");
+      const schema = json(root, "schema.json");
+      assert.ok(schema.tables.some((table) => table.name === "HRD.TB_BIG" && table.primary_key.join(",") === "ID"), "큰 덤프 안의 테이블");
+      assert.ok(json(root, "symbols.json").symbols.some((item) => item.id.includes("appMain")), "나머지 소스는 그대로");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * JS·JSP 인라인 스크립트·PowerBuilder도 type:"function" 심볼을 만든다. schema.json의 functions는 PL/SQL만 담아야 한다
+   * (실측 2026-11-05: PL/SQL이 없는 xu25-server에서 functions가 1,320개로 나왔다 — 전부 JSP의 JS 함수).
+   */
+  register("schema.json의 functions·procedures에는 다른 언어의 함수가 섞이지 않는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "web/app.js", `function submitOrder(){ return validateOrder(); }
+function validateOrder(){ return true; }
+`);
+      write(root, "WEB-INF/jsp/list.jsp", `<script>function onSearch(){ return 1; }</script>
+`);
+      write(root, "db/F_PRICE.fnc", `CREATE OR REPLACE FUNCTION HRD.F_PRICE(p_cd VARCHAR2) RETURN NUMBER IS BEGIN RETURN 1; END;
+/
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema.functions.map((item) => item.id).join(","), "F_PRICE", JSON.stringify(schema.functions.map((item) => item.id)));
+      assert.equal(schema.procedures.length, 0, JSON.stringify(schema.procedures.map((item) => item.id)));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * 초기화가 "DB 쪽을 얼마나 읽었나 / 무엇이 빠졌나"를 말할 수 있어야 한다. 자바·XML이 부르는데 이 저장소에 정의가 없는
+   * 프로시저를 호출 횟수 순으로 남기면 덤프를 요청할 때 "이 프로시저 소스를 내보내 주세요"를 정확히 짚을 수 있다.
+   * 오라클 소스 전용 확장자(.prc 등)는 설정 없이도 덤프로 취급해 4MB 상한을 풀어 준다.
+   */
+  register("_meta.db_source는 정의가 없는 프로시저를 호출 횟수 순으로 기록하고 덤프가 있으면 줄어든다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "src/A.java", `package acme;
+public class A {
+  public void one() { conn.prepareCall("{call PR_A(?)}"); }
+  public void two() { conn.prepareCall("{call PR_A(?)}"); }
+  public void three() { conn.prepareCall("{call HRD.PR_B(?)}"); }
+}
+`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      let db = json(root, "_meta.json").db_source;
+      assert.ok(db, "정의 없는 프로시저만 있어도 현황을 남긴다");
+      assert.equal(db.undefined_procedures.items.map((item) => `${item.name}:${item.callers}`).join(","), "PR_A:2,HRD.PR_B:1", JSON.stringify(db.undefined_procedures));
+      assert.ok(db.undefined_procedures.items[0].first_call.startsWith("src/A.java:"), "첫 호출 위치");
+      assert.equal(db.procedures, 0);
+      assert.equal(json(root, "_analysis_input.json").db_source.undefined_procedures.count, 2, "analyzer 입력에도 실린다");
+
+      // 설정 없이 PR_A 소스를 4MB 넘는 .prc 로 둔다 — 전용 확장자라 상한에서 풀린다
+      write(root, "db/PR_A.prc", "-- filler line for size padding\n".repeat(140000) + `CREATE OR REPLACE PROCEDURE HRD.PR_A (p_id IN NUMBER) IS BEGIN DELETE FROM TB_X WHERE ID = p_id; END;\n/\n`);
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      db = json(root, "_meta.json").db_source;
+      assert.ok(!json(root, "_meta.json").excluded_sources.by_reason["too-large"], "전용 확장자는 too-large 로 빠지지 않는다");
+      assert.equal(db.undefined_procedures.count, 1, JSON.stringify(db.undefined_procedures));
+      assert.equal(db.undefined_procedures.items[0].name, "HRD.PR_B");
+      assert.equal(db.procedures, 1);
+      assert.equal(db.source_files, 1);
+      const schema = json(root, "schema.json");
+      assert.equal(schema.procedures.find((item) => item.id === "PR_A").external_callers.length, 2, "자바 호출자 2곳이 프로시저에 붙는다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("DB 소스도 호출도 없는 프로젝트에는 db_source를 만들지 않는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "src/App.js", "function appMain(){ return 1; }\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      assert.ok(!("db_source" in json(root, "_meta.json")));
+      assert.ok(!("db_source" in json(root, "_analysis_input.json")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * DDL 범용화 — MSSQL(SSMS 스크립트) · MySQL(mysqldump) · PostgreSQL(pg_dump). 방언마다 식별자 따옴표·꼬리절·제약 문법이 다르다.
+   * 실제 DB 출력이 아니라 각 도구가 내는 모양을 따른 픽스처다.
+   */
+  register("MSSQL 덤프: 대괄호 식별자·CLUSTERED·WITH CHECK ADD·GO 구분을 읽고 방언을 mssql로 기록한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/mssql.sql", "USE [HRD]\nGO\nSET ANSI_NULLS ON\nGO\nSET QUOTED_IDENTIFIER ON\nGO\nCREATE TABLE [dbo].[TB_COURSE](\n\t[COURSE_CD] [nvarchar](20) NOT NULL,\n\t[COURSE_NM] [nvarchar](200) NULL,\n\t[PRICE] [decimal](12, 2) NULL,\n CONSTRAINT [PK_TB_COURSE] PRIMARY KEY CLUSTERED\n(\n\t[COURSE_CD] ASC\n)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF) ON [PRIMARY]\n) ON [PRIMARY]\nGO\nCREATE TABLE [dbo].[TB_ENROLL](\n\t[ENROLL_NO] [bigint] IDENTITY(1,1) NOT NULL,\n\t[USER_NO] [nvarchar](20) NOT NULL,\n\t[COURSE_CD] [nvarchar](20) NOT NULL,\n\t[STATUS] [char](1) NULL,\n\t[REG_DT] [datetime] NOT NULL,\n CONSTRAINT [PK_TB_ENROLL] PRIMARY KEY CLUSTERED\n(\n\t[ENROLL_NO] ASC\n)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF) ON [PRIMARY]\n) ON [PRIMARY]\nGO\nALTER TABLE [dbo].[TB_ENROLL]  WITH CHECK ADD  CONSTRAINT [FK_ENROLL_COURSE] FOREIGN KEY([COURSE_CD])\nREFERENCES [dbo].[TB_COURSE] ([COURSE_CD])\nGO\nCREATE UNIQUE NONCLUSTERED INDEX [UX_ENROLL] ON [dbo].[TB_ENROLL]\n(\n\t[USER_NO] ASC,\n\t[COURSE_CD] ASC\n)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF) ON [PRIMARY]\nGO\nCREATE VIEW [dbo].[V_ENROLL_CNT]\nAS\nSELECT COURSE_CD, COUNT(*) AS CNT FROM dbo.TB_ENROLL GROUP BY COURSE_CD\nGO\nCREATE SEQUENCE [dbo].[SEQ_NOTICE] AS [bigint] START WITH 100 INCREMENT BY 5\nGO\nCREATE SYNONYM [dbo].[ENROLL] FOR [HRD].[dbo].[TB_ENROLL]\nGO\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.dialect, "mssql", JSON.stringify(schema._meta));
+      const byName = Object.fromEntries(schema.tables.map((table) => [table.name, table]));
+      assert.equal(Object.keys(byName).sort().join(","), "dbo.TB_COURSE,dbo.TB_ENROLL");
+      assert.equal(byName["dbo.TB_COURSE"].columns.length, 3, "GO·ON [PRIMARY] 꼬리절이 컬럼을 오염시키지 않는다");
+      assert.equal(byName["dbo.TB_COURSE"].columns.find((c) => c.name === "COURSE_CD").type, "nvarchar(20)");
+      assert.equal(byName["dbo.TB_COURSE"].columns.find((c) => c.name === "PRICE").type, "decimal(12, 2)");
+      assert.equal(byName["dbo.TB_COURSE"].primary_key.join(","), "COURSE_CD", "PRIMARY KEY CLUSTERED (... ASC)");
+      assert.equal(byName["dbo.TB_ENROLL"].primary_key.join(","), "ENROLL_NO");
+      assert.equal(byName["dbo.TB_ENROLL"].foreign_keys.length, 1, "WITH CHECK ADD CONSTRAINT");
+      assert.equal(byName["dbo.TB_ENROLL"].foreign_keys[0].references_table, "dbo.TB_COURSE");
+      assert.equal(byName["dbo.TB_ENROLL"].indexes[0].name, "UX_ENROLL");
+      assert.equal(byName["dbo.TB_ENROLL"].indexes[0].columns.join(","), "USER_NO,COURSE_CD", "NONCLUSTERED INDEX ... (a ASC, b ASC)");
+      assert.equal(byName["dbo.TB_ENROLL"].indexes[0].unique, true);
+      assert.equal(schema.views.find((v) => v.name === "dbo.V_ENROLL_CNT")?.tables.join(","), "dbo.TB_ENROLL", "뷰 본문은 GO 에서 끝난다");
+      assert.equal(schema.sequences[0].start_with + "/" + schema.sequences[0].increment_by, "100/5");
+      assert.equal(schema.synonyms[0].target, "HRD.dbo.TB_ENROLL");
+      assert.equal(validateHarness({ root, pluginRoot: PLUGIN_ROOT }).checks.filter((item) => item.level === "FAIL").length, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("MySQL 덤프: 백틱·ENGINE=·인라인 KEY·/*!50001*/로 감싼 뷰를 읽고 방언을 mysql로 기록한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/mysql.sql", "-- MySQL dump 10.13  Distrib 8.0\n/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\nDROP TABLE IF EXISTS `tb_course`;\n/*!40101 SET @saved_cs_client     = @@character_set_client */;\nCREATE TABLE `tb_course` (\n  `course_cd` varchar(20) NOT NULL,\n  `course_nm` varchar(200) DEFAULT NULL,\n  `price` decimal(12,2) unsigned DEFAULT '0.00',\n  PRIMARY KEY (`course_cd`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\nDROP TABLE IF EXISTS `tb_enroll`;\nCREATE TABLE `tb_enroll` (\n  `enroll_no` bigint(20) NOT NULL AUTO_INCREMENT,\n  `user_no` varchar(20) NOT NULL,\n  `course_cd` varchar(20) NOT NULL,\n  `status` char(1) DEFAULT 'A',\n  `reg_dt` datetime DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (`enroll_no`),\n  UNIQUE KEY `ux_enroll` (`user_no`,`course_cd`),\n  KEY `idx_reg` (`reg_dt`),\n  CONSTRAINT `fk_enroll_course` FOREIGN KEY (`course_cd`) REFERENCES `tb_course` (`course_cd`) ON DELETE CASCADE\n) ENGINE=InnoDB AUTO_INCREMENT=10 DEFAULT CHARSET=utf8mb4;\n/*!50001 CREATE ALGORITHM=UNDEFINED */\n/*!50013 DEFINER=`root`@`%` SQL SECURITY DEFINER */\n/*!50001 VIEW `v_enroll_cnt` AS select `tb_enroll`.`course_cd` AS `course_cd`,count(0) AS `cnt` from `tb_enroll` group by `tb_enroll`.`course_cd` */;\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.dialect, "mysql", JSON.stringify(schema._meta));
+      const byName = Object.fromEntries(schema.tables.map((table) => [table.name, table]));
+      assert.equal(Object.keys(byName).sort().join(","), "tb_course,tb_enroll");
+      const enroll = byName.tb_enroll;
+      assert.equal(enroll.columns.map((c) => c.name).join(","), "enroll_no,user_no,course_cd,status,reg_dt", "KEY·UNIQUE KEY 줄이 가짜 컬럼이 되면 안 된다");
+      assert.equal(enroll.primary_key.join(","), "enroll_no");
+      assert.equal(enroll.columns.find((c) => c.name === "status").default, "'A'");
+      assert.equal(enroll.columns.find((c) => c.name === "reg_dt").default, "CURRENT_TIMESTAMP");
+      assert.equal(enroll.indexes.map((i) => i.name + (i.unique ? ":U" : "")).sort().join(","), "idx_reg,ux_enroll:U");
+      assert.equal(enroll.indexes.find((i) => i.name === "ux_enroll").columns.join(","), "user_no,course_cd");
+      assert.equal(enroll.foreign_keys[0].references_table, "tb_course");
+      assert.equal(byName.tb_course.columns.find((c) => c.name === "price").default, "'0.00'");
+      assert.equal(schema.views.find((v) => v.name === "v_enroll_cnt")?.tables.join(","), "tb_enroll", "버전 조건부 주석으로 감싼 뷰");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("PostgreSQL 덤프: 다단어 타입·ALTER TABLE ONLY·USING btree·::캐스트 기본값을 읽고 방언을 postgresql로 기록한다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/pg.sql", "--\n-- PostgreSQL database dump\n--\nSET statement_timeout = 0;\nSET search_path = public, pg_catalog;\n\nCREATE TABLE public.tb_course (\n    course_cd character varying(20) NOT NULL,\n    course_nm character varying(200),\n    price numeric(12,2) DEFAULT 0\n);\nALTER TABLE public.tb_course OWNER TO app;\n\nCREATE TABLE public.tb_enroll (\n    enroll_no bigint NOT NULL,\n    user_no character varying(20) NOT NULL,\n    course_cd character varying(20) NOT NULL,\n    status character(1) DEFAULT 'A'::bpchar,\n    reg_dt timestamp without time zone DEFAULT now()\n);\nALTER TABLE public.tb_enroll OWNER TO app;\n\nCREATE SEQUENCE public.tb_enroll_enroll_no_seq\n    START WITH 1\n    INCREMENT BY 1\n    NO MINVALUE\n    NO MAXVALUE\n    CACHE 1;\n\nALTER TABLE ONLY public.tb_course\n    ADD CONSTRAINT tb_course_pkey PRIMARY KEY (course_cd);\n\nALTER TABLE ONLY public.tb_enroll\n    ADD CONSTRAINT tb_enroll_pkey PRIMARY KEY (enroll_no);\n\nALTER TABLE ONLY public.tb_enroll\n    ADD CONSTRAINT fk_enroll_course FOREIGN KEY (course_cd) REFERENCES public.tb_course(course_cd);\n\nCREATE UNIQUE INDEX ux_enroll ON public.tb_enroll USING btree (user_no, course_cd);\n\nCREATE VIEW public.v_enroll_cnt AS\n SELECT tb_enroll.course_cd,\n    count(*) AS cnt\n   FROM public.tb_enroll\n  GROUP BY tb_enroll.course_cd;\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.dialect, "postgresql", JSON.stringify(schema._meta));
+      const byName = Object.fromEntries(schema.tables.map((table) => [table.name, table]));
+      assert.equal(Object.keys(byName).sort().join(","), "public.tb_course,public.tb_enroll");
+      const enroll = byName["public.tb_enroll"];
+      assert.equal(enroll.columns.find((c) => c.name === "user_no").type, "character varying(20)");
+      assert.equal(enroll.columns.find((c) => c.name === "reg_dt").type, "timestamp without time zone");
+      assert.equal(enroll.columns.find((c) => c.name === "reg_dt").default, "now()");
+      assert.equal(enroll.columns.find((c) => c.name === "status").default, "'A'");
+      assert.equal(enroll.primary_key.join(","), "enroll_no", "ALTER TABLE ONLY ... ADD CONSTRAINT ... PRIMARY KEY");
+      assert.equal(enroll.foreign_keys[0].references_table, "public.tb_course", "REFERENCES public.tb_course(course_cd) — 괄호 앞 공백 없음");
+      assert.equal(enroll.indexes[0].name + ":" + enroll.indexes[0].columns.join("+"), "ux_enroll:user_no+course_cd", "USING btree");
+      assert.equal(schema.views.find((v) => v.name === "public.v_enroll_cnt")?.tables.join(","), "public.tb_enroll");
+      assert.equal(schema.sequences[0].name, "public.tb_enroll_enroll_no_seq");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /*
+   * T-SQL · MySQL · PL/pgSQL 루틴. 예전에는 .sql 에 CREATE PROCEDURE 가 있으면 DB 종류와 무관하게 오라클 PL/SQL 파서로 갔다.
+   * 방언별 추출기가 같은 모양(schema.json 의 procedures·functions·triggers)을 내고, 자바 호출이 DB 루틴까지 이어져야 한다.
+   */
+  register("MSSQL 루틴: EXEC 호출·읽기/쓰기 테이블·트리거(inserted 제외)를 읽고 GO 뒤 시드 INSERT 를 섞지 않는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/mssql_routines.sql", "SET ANSI_NULLS ON\nGO\nCREATE PROCEDURE [dbo].[usp_apply_enroll]\n\t@user_no nvarchar(20),\n\t@course_cd nvarchar(20)\nAS\nBEGIN\n\tSET NOCOUNT ON;\n\tDECLARE @cnt int\n\tSELECT @cnt = COUNT(*) FROM dbo.TB_ENROLL WHERE USER_NO = @user_no AND COURSE_CD = @course_cd\n\tIF @cnt > 0 RETURN 1\n\tEXEC [dbo].[usp_log_action] @user_no, 'APPLY'\n\tINSERT INTO [dbo].[TB_ENROLL] (USER_NO, COURSE_CD, STATUS, REG_DT) VALUES (@user_no, @course_cd, 'A', GETDATE())\n\tUPDATE dbo.TB_COURSE SET PRICE = PRICE WHERE COURSE_CD = @course_cd\n\tRETURN 0\nEND\nGO\nCREATE PROCEDURE [dbo].[usp_log_action] @user nvarchar(20), @act nvarchar(10) AS\nBEGIN\n\tINSERT INTO dbo.TB_ENROLL_LOG (USER_NO, ACT) VALUES (@user, @act)\nEND\nGO\nCREATE FUNCTION [dbo].[fn_enroll_count](@course nvarchar(20)) RETURNS int AS\nBEGIN\n\tDECLARE @n int\n\tSELECT @n = COUNT(*) FROM dbo.TB_ENROLL WHERE COURSE_CD = @course\n\tRETURN @n\nEND\nGO\nCREATE TRIGGER [dbo].[trg_enroll_audit] ON [dbo].[TB_ENROLL] AFTER INSERT, UPDATE AS\nBEGIN\n\tINSERT INTO dbo.TB_ENROLL_LOG (USER_NO, ACT) SELECT USER_NO, 'TRG' FROM inserted\nEND\nGO\nINSERT INTO dbo.TB_COURSE (COURSE_CD) VALUES ('SEED')\nGO\n");
+      write(root, "src/Svc.java", "package acme;\npublic class Svc {\n  public void apply() { conn.prepareCall(\"{call dbo.usp_apply_enroll(?, ?)}\"); }\n  public void log() { conn.prepareCall(\"EXEC [dbo].[usp_log_action] ?, ?\"); }\n}\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.dialect, "mssql");
+      const apply = schema.procedures.find((item) => item.id === "USP_APPLY_ENROLL");
+      assert.ok(apply, JSON.stringify(schema.procedures.map((item) => item.id)));
+      assert.equal(apply.dialect, "mssql");
+      assert.equal(apply.package, null);
+      assert.equal(apply.tables_read.join(","), "dbo.TB_ENROLL");
+      assert.equal([...apply.tables_written].sort().join(","), "dbo.TB_COURSE,dbo.TB_ENROLL", "문장 끝 ; 없이도 INSERT·UPDATE 를 각각 센다");
+      assert.equal(apply.calls.join(","), "USP_LOG_ACTION", "EXEC [dbo].[usp_log_action]");
+      assert.equal(apply.external_callers.join(","), "acme.Svc.apply", "{call dbo.usp_apply_enroll} — 스키마 접두사가 붙어도 연결된다");
+      assert.equal(schema.procedures.find((item) => item.id === "USP_LOG_ACTION").external_callers.join(","), "acme.Svc.log", "EXEC [dbo].[usp_log_action] ?, ?");
+      assert.equal(schema.functions.find((item) => item.id === "FN_ENROLL_COUNT").tables_read.join(","), "dbo.TB_ENROLL");
+      const trigger = schema.triggers.find((item) => item.id === "TRG_ENROLL_AUDIT");
+      assert.equal(trigger.table, "TB_ENROLL");
+      assert.equal(trigger.events.join(","), "INSERT,UPDATE");
+      assert.equal(trigger.tables_written.join(","), "dbo.TB_ENROLL_LOG", "inserted 가상 테이블은 테이블이 아니다");
+      assert.ok(![...schema.procedures, ...schema.functions, ...schema.triggers].some((item) => item.tables_written.includes("dbo.TB_COURSE") && item.id !== "USP_APPLY_ENROLL"), "GO 뒤 시드 INSERT 는 어느 루틴의 사용처도 아니다");
+      assert.equal(json(root, "_meta.json").db_source.undefined_procedures.count, 0, "자바가 부르는 프로시저가 전부 덤프에 정의돼 있다");
+      assert.equal(validateHarness({ root, pluginRoot: PLUGIN_ROOT }).checks.filter((item) => item.level === "FAIL").length, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("MySQL 루틴: mysqldump 의 DELIMITER·조건부 주석으로 감싼 프로시저·트리거와 CALL 호출을 읽는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/mysql_routines.sql", "DELIMITER ;;\n/*!50003 CREATE*/ /*!50020 DEFINER=`root`@`%`*/ /*!50003 PROCEDURE `usp_apply_enroll`(IN p_user varchar(20), IN p_course varchar(20))\nBEGIN\n  DECLARE v_cnt INT;\n  SELECT COUNT(*) INTO v_cnt FROM tb_enroll WHERE user_no = p_user AND course_cd = p_course;\n  IF v_cnt = 0 THEN\n    INSERT INTO tb_enroll (user_no, course_cd, status) VALUES (p_user, p_course, 'A');\n    CALL usp_log_action(p_user, 'APPLY');\n  END IF;\nEND */;;\nDELIMITER ;\nDELIMITER ;;\n/*!50003 CREATE*/ /*!50020 DEFINER=`root`@`%`*/ /*!50003 PROCEDURE `usp_log_action`(IN p_user varchar(20), IN p_act varchar(10))\nBEGIN\n  INSERT INTO tb_enroll_log (user_no, act) VALUES (p_user, p_act);\nEND */;;\nDELIMITER ;\nDELIMITER ;;\n/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER `trg_enroll_ai` AFTER INSERT ON `tb_enroll` FOR EACH ROW\nBEGIN\n  INSERT INTO tb_enroll_log (user_no, act) VALUES (NEW.user_no, 'TRG');\nEND */;;\nDELIMITER ;\nINSERT INTO tb_course (course_cd) VALUES ('SEED');\n");
+      write(root, "src/Svc.java", "package acme;\npublic class Svc {\n  public void apply() { conn.prepareCall(\"{call usp_apply_enroll(?, ?)}\"); }\n  public void log() { conn.prepareCall(\"CALL usp_log_action(?, ?)\"); }\n}\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.dialect, "mysql");
+      const apply = schema.procedures.find((item) => item.id === "USP_APPLY_ENROLL");
+      assert.ok(apply, JSON.stringify(schema.procedures.map((item) => item.id)));
+      assert.equal(apply.dialect, "mysql");
+      assert.equal(apply.tables_read.join(","), "tb_enroll");
+      assert.equal(apply.tables_written.join(","), "tb_enroll");
+      assert.equal(apply.calls.join(","), "USP_LOG_ACTION", "CALL usp_log_action(...)");
+      assert.equal(apply.external_callers.join(","), "acme.Svc.apply");
+      assert.equal(schema.procedures.find((item) => item.id === "USP_LOG_ACTION").external_callers.join(","), "acme.Svc.log", "자바의 CALL usp_log_action(?, ?)");
+      const trigger = schema.triggers.find((item) => item.id === "TRG_ENROLL_AI");
+      assert.equal(trigger.table + ":" + trigger.events.join(","), "TB_ENROLL:INSERT");
+      assert.equal(trigger.tables_written.join(","), "tb_enroll_log");
+      assert.ok(![...schema.procedures, ...schema.triggers].some((item) => item.tables_written.includes("tb_course")), "DELIMITER 뒤 시드 INSERT 는 루틴의 사용처가 아니다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("PostgreSQL 루틴: $$ 본문 함수·프로시저·트리거(EXECUTE FUNCTION)와 PERFORM·CALL 호출을 읽는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/pg_routines.sql", "SET search_path = public, pg_catalog;\n\nCREATE FUNCTION public.fn_apply_enroll(p_user character varying, p_course character varying) RETURNS integer\n    LANGUAGE plpgsql\n    AS $$\nDECLARE\n  v_cnt integer;\nBEGIN\n  SELECT count(*) INTO v_cnt FROM public.tb_enroll WHERE user_no = p_user AND course_cd = p_course;\n  IF v_cnt > 0 THEN RETURN 1; END IF;\n  INSERT INTO public.tb_enroll (user_no, course_cd, status) VALUES (p_user, p_course, 'A');\n  PERFORM public.fn_log_action(p_user, 'APPLY');\n  RETURN 0;\nEND;\n$$;\nALTER FUNCTION public.fn_apply_enroll(p_user character varying, p_course character varying) OWNER TO app;\n\nCREATE FUNCTION public.fn_log_action(p_user character varying, p_act character varying) RETURNS void\n    LANGUAGE plpgsql\n    AS $$\nBEGIN\n  INSERT INTO public.tb_enroll_log (user_no, act) VALUES (p_user, p_act);\nEND;\n$$;\n\nCREATE FUNCTION public.fn_enroll_audit() RETURNS trigger\n    LANGUAGE plpgsql\n    AS $$\nBEGIN\n  INSERT INTO public.tb_enroll_log (user_no, act) VALUES (NEW.user_no, 'TRG');\n  RETURN NEW;\nEND;\n$$;\n\nCREATE PROCEDURE public.usp_archive(p_days integer)\n    LANGUAGE plpgsql\n    AS $$\nBEGIN\n  DELETE FROM public.tb_enroll WHERE reg_dt < now() - make_interval(days => p_days);\n  CALL public.fn_log_action('ARCHIVE', 'X');\nEND;\n$$;\n\nCREATE TRIGGER trg_enroll_audit AFTER INSERT OR UPDATE ON public.tb_enroll FOR EACH ROW EXECUTE FUNCTION public.fn_enroll_audit();\n\nINSERT INTO public.tb_course (course_cd) VALUES ('SEED');\n");
+      write(root, "src/Svc.java", "package acme;\npublic class Svc {\n  public void apply() { conn.prepareCall(\"{? = call fn_apply_enroll(?, ?)}\"); }\n  public void archive() { conn.prepareCall(\"CALL usp_archive(?)\"); }\n}\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const schema = json(root, "schema.json");
+      assert.equal(schema._meta.dialect, "postgresql");
+      const apply = schema.functions.find((item) => item.id === "FN_APPLY_ENROLL");
+      assert.ok(apply, JSON.stringify(schema.functions.map((item) => item.id)));
+      assert.equal(apply.dialect, "postgresql");
+      assert.equal(apply.tables_read.join(",") + "|" + apply.tables_written.join(","), "public.tb_enroll|public.tb_enroll");
+      assert.equal(apply.calls.join(","), "FN_LOG_ACTION", "PERFORM public.fn_log_action(...)");
+      assert.equal(apply.external_callers.join(","), "acme.Svc.apply", "{? = call fn_apply_enroll(?, ?)}");
+      const archive = schema.procedures.find((item) => item.id === "USP_ARCHIVE");
+      assert.equal(archive.kind, "procedure");
+      assert.equal(archive.calls.join(","), "FN_LOG_ACTION", "CALL public.fn_log_action(...)");
+      assert.equal(archive.external_callers.join(","), "acme.Svc.archive");
+      assert.equal([...schema.functions.find((item) => item.id === "FN_LOG_ACTION").called_by].sort().join(","), "FN_APPLY_ENROLL,USP_ARCHIVE");
+      const trigger = schema.triggers.find((item) => item.id === "TRG_ENROLL_AUDIT");
+      assert.equal(trigger.table + ":" + trigger.events.join(","), "TB_ENROLL:INSERT,UPDATE");
+      assert.equal(trigger.calls.join(","), "FN_ENROLL_AUDIT", "트리거 → EXECUTE FUNCTION");
+      assert.equal(trigger.tables_written.length, 0, "본문 없는 트리거가 뒤의 시드 INSERT 를 삼키지 않는다");
+      assert.equal(schema.functions.find((item) => item.id === "FN_ENROLL_AUDIT").called_by.join(","), "TRG_ENROLL_AUDIT");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /* 오라클 {call SCHEMA.PROC} 도 같은 이유로 연결되지 않았다 — 스키마 접두사를 패키지 한정자로 보고 후보를 버렸다. */
+  register("스키마 접두사가 붙은 {call HRD.PR_X}도 정의된 독립 프로시저로 연결한다(오라클)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "src/A.java", "package acme;\npublic class A { public void go() { conn.prepareCall(\"{call HRD.PR_X(?)}\"); } }\n");
+      write(root, "db/PR_X.prc", "CREATE OR REPLACE PROCEDURE HRD.PR_X (p IN NUMBER) IS BEGIN DELETE FROM TB_T WHERE ID = p; END;\n/\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const proc = json(root, "schema.json").procedures.find((item) => item.id === "PR_X");
+      assert.equal(proc.external_callers.join(","), "acme.A.go");
+      assert.ok(!json(root, "_meta.json").db_source?.undefined_procedures?.count, "정의가 있으므로 정의 없는 프로시저가 아니다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("방언을 가릴 수 없는 .sql 프로시저는 예전처럼 오라클 경로로 읽는다(하위 호환)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-"));
+    try {
+      write(root, "db/p.sql", "CREATE OR REPLACE PROCEDURE P_GEN IS\nBEGIN\n  UPDATE TB_A SET X = 1;\nEND;\n/\n");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const proc = json(root, "schema.json").procedures.find((item) => item.id === "P_GEN");
+      assert.equal(proc.dialect, "oracle");
+      assert.equal(proc.tables_written.join(","), "TB_A");
+      assert.ok(!json(root, "_meta.json").adapter_coverage.partial_targets.some((t) => /T-SQL/.test(t.reason)));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

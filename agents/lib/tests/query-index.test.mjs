@@ -257,4 +257,42 @@ public class MA00001Service {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  /*
+   * 테이블 컬럼을 바꾸면 소스 SQL뿐 아니라 DB 안의 프로시저·트리거·뷰도 깨진다. 덤프로 읽은 PL/SQL이 schema --table 에 함께 나와야 한다.
+   * 이름 비교는 정확히 — TB_ENROLL 질의가 TB_ENROLL_LOG를 쓰는 객체를 영향권으로 잡으면 안 된다.
+   */
+  register("schema --table은 그 테이블을 읽고 쓰는 프로시저·트리거·뷰를 함께 준다", () => {
+    withIndex({
+      schema: {
+        _meta: {},
+        tables: [{ name: "HRD.TB_ENROLL", columns: [{ name: "ENROLL_NO" }], primary_key: ["ENROLL_NO"], foreign_keys: [], indexes: [], source_file: "db/t.sql" },
+          { name: "HRD.TB_ENROLL_LOG", columns: [], primary_key: [], foreign_keys: [], indexes: [], source_file: "db/t.sql" }],
+        procedures: [
+          { id: "PKG_ENROLL.ENROLL", name: "ENROLL", kind: "procedure", implemented: true, file: "db/PKG_ENROLL.pkb", line: 2, tables_read: [], tables_written: ["TB_ENROLL"] },
+          { id: "PKG_LOG.WRITE", name: "WRITE", kind: "procedure", implemented: true, file: "db/PKG_LOG.pkb", line: 2, tables_read: [], tables_written: ["TB_ENROLL_LOG"] },
+        ],
+        functions: [{ id: "PKG_ENROLL.IS_FULL", name: "IS_FULL", kind: "function", implemented: false, file: "db/PKG_ENROLL.pks", line: 3, tables_read: ["hrd.\"tb_enroll\""], tables_written: [] }],
+        triggers: [{ id: "TRG_AUDIT", name: "TRG_AUDIT", table: "HRD.TB_ENROLL", events: ["INSERT", "UPDATE"], file: "db/TRG.trg", line: 1, tables_read: [], tables_written: ["TB_ENROLL_LOG"] }],
+        views: [{ name: "HRD.V_SUMMARY", materialized: false, tables: ["TB_ENROLL", "TB_COURSE"], file: "db/v.sql", line: 3 }],
+      },
+    }, (root) => {
+      const result = COMMANDS.schema({ root, table: "TB_ENROLL", limit: 50 });
+      const byId = Object.fromEntries(result.accessed_by.map((item) => [item.id, item]));
+      assert.equal(Object.keys(byId).sort().join(","), "HRD.V_SUMMARY,PKG_ENROLL.ENROLL,PKG_ENROLL.IS_FULL,TRG_AUDIT", JSON.stringify(result.accessed_by));
+      assert.equal(byId["PKG_ENROLL.ENROLL"].access, "write");
+      assert.equal(byId["PKG_ENROLL.IS_FULL"].access, "read", "스키마 접두사·따옴표·대소문자를 무시하고 맞춘다");
+      assert.equal(byId["PKG_ENROLL.IS_FULL"].implemented, false, "본문을 읽지 못한 객체는 그 사실을 함께 준다");
+      assert.equal(byId["TRG_AUDIT"].access, "on-table(INSERT/UPDATE)");
+      assert.equal(byId["HRD.V_SUMMARY"].kind, "view");
+      assert.ok(!byId["PKG_LOG.WRITE"], "TB_ENROLL_LOG만 쓰는 객체는 TB_ENROLL 영향권이 아니다");
+      assert.equal(result.accessed_by_total, 4);
+
+      const log = COMMANDS.schema({ root, table: "TB_ENROLL_LOG", limit: 50 });
+      assert.equal(log.accessed_by.map((item) => item.id).sort().join(","), "PKG_LOG.WRITE,TRG_AUDIT");
+
+      /* 목록 조회에는 싣지 않는다 — 수백 개 스키마를 통째로 뱉지 않는다. */
+      assert.ok(!("accessed_by" in COMMANDS.schema({ root, limit: 50 })));
+    });
+  });
 }

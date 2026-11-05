@@ -311,6 +311,10 @@ node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" estimate --root "[절대�
 
 ```
 인덱싱 완료 — 소스 [files]개 파일, 심볼 [symbols]개. (여기까지 LLM 사용 없음)
+[db_source가 있으면 — block: index 반환의 `db_source`]
+DB 소스: 테이블 [N] · 뷰 [N] · 패키지 [N] · 프로시저/함수 [N] · 트리거 [N] (읽은 파일 [N]개)
+정의가 없는 프로시저: [undefined_count]개 — 코드는 부르지만 이 저장소에 소스가 없음. 호출 많은 순: [상위 3개와 호출 수]
+  → 이 프로시저들의 소스를 덤프로 넣으면 판정 로직까지 분석됩니다(아래 Phase 3 안내).
 
 이제 LLM 분석 구간입니다. 예상 규모:
   Tier [tier] 기준 · 약 [estimated_minutes]분 · 약 [estimated_tokens] 토큰
@@ -545,6 +549,16 @@ Agent(
 - _workspace/index/dead_code.json
 - _workspace/index/env_branches.json
 - _workspace/index/owasp_top10.json         (Security 설정 탐지 시)
+
+[DB 소스 현황] (`_meta.json`의 `db_source`가 있을 때만 — 인덱서가 결정론적으로 센 값이며 AI 추정이 아니다)
+- 읽은 DB 소스: 테이블 N · 뷰 N · 시퀀스 N · 시노님 N · 패키지 N · 프로시저 N · 함수 N · 트리거 N (파일 N개)
+- 정의가 없는 프로시저 [undefined_procedures.count]개 (호출 많은 순 상위 10개를 `이름 (호출 N곳, 첫 호출 파일:줄)`로)
+  - 업무 판정(수강신청 5중 체크 같은 것)이 이쪽에 있을 가능성이 높다. 이 저장소만으로는 그 조건을 알 수 없다고 명시한다.
+  - 안내: "DB 덤프(패키지·프로시저 소스, 가능하면 객체별 파일)를 `db/dump/` 같은 폴더에 두고 `_workspace/indexer-config.json`에
+    `\"db_dump_paths\": [\"db/dump\"]`를 추가한 뒤 '인덱스만 갱신해줘'(`--mode incremental`)를 실행하세요. `.pks`·`.pkb`·`.prc`·`.fnc`·`.trg`
+    확장자는 설정 없이도 읽습니다. 덤프는 커밋하지 마세요(업무 로직·스키마 포함, 데이터 행은 넣지 않음). 만드는 법은 docs/site/configuration/indexer-config.md."
+  - `--mode init`으로 다시 만들면 AI 판정 패치가 사라지므로 `incremental`을 쓴다.
+- `db_source`가 없으면 이 절을 생략한다(DB 소스도 프로시저 호출도 없는 프로젝트).
 
 구조 검증 (validator):
 [신뢰도 점수 + 보완 권장 항목]

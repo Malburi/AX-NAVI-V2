@@ -92,6 +92,34 @@ function cap(items, limit) {
 }
 
 const matches = (haystack, needle) => String(haystack || "").toLowerCase().includes(String(needle || "").toLowerCase());
+/*
+ * 테이블 이름 비교는 스키마 접두사·따옴표·대소문자를 무시하고 마지막 구간을 정확히 맞춘다.
+ * `matches`(부분 문자열)로 하면 `TB_ENROLL` 질의가 `TB_ENROLL_LOG`를 쓰는 객체까지 영향권으로 잡는다.
+ */
+const bareTable = (name) => String(name || "").replace(/["`]/g, "").split(".").at(-1).toLowerCase();
+function dbObjectsTouching(schemaIndex, table) {
+  const target = bareTable(table);
+  const has = (list) => (list || []).some((name) => bareTable(name) === target);
+  const found = [];
+  for (const [kind, items] of [["procedure", schemaIndex.procedures], ["function", schemaIndex.functions]]) {
+    for (const item of items || []) {
+      const read = has(item.tables_read);
+      const write = has(item.tables_written);
+      if (read || write) found.push({ kind, id: item.id || item.name, access: read && write ? "read+write" : write ? "write" : "read", implemented: item.implemented, file: item.file, line: item.line });
+    }
+  }
+  for (const item of schemaIndex.triggers || []) {
+    const onTable = bareTable(item.table) === target;
+    const read = has(item.tables_read);
+    const write = has(item.tables_written);
+    if (onTable || read || write) found.push({ kind: "trigger", id: item.id || item.name, access: onTable ? `on-table(${(item.events || []).join("/")})` : write ? "write" : "read", file: item.file, line: item.line });
+  }
+  for (const item of schemaIndex.views || []) {
+    if (has(item.tables)) found.push({ kind: item.materialized ? "materialized-view" : "view", id: item.name, access: "read", file: item.file, line: item.line });
+  }
+  return found.sort((a, b) => (a.kind + a.id < b.kind + b.id ? -1 : 1));
+}
+
 /* `--id`는 전체 id와 마지막 segment 둘 다로 맞춘다 — 에이전트가 짧은 이름으로 물어도 통하게. */
 const idMatches = (id, query) => id === query || String(id).split(".").at(-1) === query || matches(id, query);
 
@@ -524,7 +552,8 @@ const COMMANDS = {
 
   /* 테이블 정의 — 컬럼·PK·FK. "이 테이블이 무엇과 엮여 있나"는 온보딩 1번 질문이다. */
   schema({ root, indexDir, table, limit }) {
-    const tables = loadIndex(root, "schema", indexDir).tables || [];
+    const schemaIndex = loadIndex(root, "schema", indexDir);
+    const tables = schemaIndex.tables || [];
     const hits = table ? tables.filter((item) => matches(item.name, table)) : tables;
     /* 테이블을 지목했으면 정의 전체를, 목록 조회면 이름·컬럼 수만 준다(수백 개면 그것만으로도 크다). */
     const shaped = table
@@ -535,7 +564,15 @@ const COMMANDS = {
       ? tables.filter((item) => (item.foreign_keys || []).some((fk) => matches(fk.references_table, table)))
         .map((item) => ({ table: item.name, foreign_keys: (item.foreign_keys || []).filter((fk) => matches(fk.references_table, table)) }))
       : [];
-    return { query: { table }, ...cap(shaped, limit), referenced_by: referencedBy };
+    /*
+     * 이 테이블을 읽고 쓰는 DB 객체(프로시저·함수·트리거·뷰). 테이블 컬럼을 바꾸면 이쪽이 깨진다 — 소스 SQL 사용처(`table`)만
+     * 보면 DB 안에 있는 로직(덤프로 읽은 PL/SQL)이 빠진다.
+     */
+    const accessedBy = table ? dbObjectsTouching(schemaIndex, table) : [];
+    return {
+      query: { table }, ...cap(shaped, limit), referenced_by: referencedBy,
+      ...(table ? { accessed_by: accessedBy.slice(0, limit), accessed_by_total: accessedBy.length } : {}),
+    };
   },
 
   /*
@@ -698,7 +735,7 @@ function printHelp() {
   trace       --id <심볼> [--depth 3]        진입점부터의 호출 경로
   sql         [--id <SQL id>] [--table T]    SQL 문과 사용처
   table       --table <테이블>               이 테이블을 건드리는 곳 전부
-  schema      [--table <테이블>]            테이블 정의·PK·FK (참조하는 쪽도 함께)
+  schema      [--table <테이블>]            테이블 정의·PK·FK (참조하는 쪽, 읽고 쓰는 프로시저·트리거·뷰도 함께)
   endpoint    [--path <경로>]                HTTP 엔드포인트
   transaction [--id <심볼>] [--file <경로>]  트랜잭션 경계
   dead        [--file <경로>]                데드 코드 후보
