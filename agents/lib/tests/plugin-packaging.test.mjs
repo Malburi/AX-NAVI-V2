@@ -24,7 +24,7 @@ export async function test(register, assert) {
     const supportedFields = new Set([
       "$schema", "name", "displayName", "version", "description", "author", "homepage",
       "repository", "license", "keywords", "metadata", "defaultEnabled", "skills", "commands",
-      "agents", "hooks", "mcpServers", "outputStyles", "lspServers", "experimental", "dependencies",
+      "agents", "hooks", "mcpServers", "outputStyles", "lspServers", "experimental", "dependencies", "userConfig",
     ]);
 
     assert.equal(plugin.name, "ax-navi");
@@ -39,6 +39,20 @@ export async function test(register, assert) {
     assert.ok(existsSync(join(root, "skills")), "기본 skills 경로가 없음");
     assert.ok(existsSync(join(root, "agents")), "기본 agents 경로가 없음");
     assert.ok(Object.keys(plugin).every((key) => supportedFields.has(key)), "비표준 plugin.json 필드가 있음");
+  });
+
+  register("DB 도구 MCP 서버가 플러그인 설정(userConfig)으로 접속 정보를 받는다", () => {
+    const plugin = json(".claude-plugin/plugin.json");
+    const fields = ["db_host", "db_port", "db_service", "db_user", "db_password", "db_owners"];
+    for (const key of fields) {
+      const option = plugin.userConfig?.[key];
+      assert.ok(option && option.type === "string" && option.title && option.description, `userConfig.${key} 는 type·title·description 이 있어야 함`);
+    }
+    assert.equal(plugin.userConfig.db_password.sensitive, true, "비밀번호는 sensitive 로 보안 저장소에 둔다");
+    const server = plugin.mcpServers?.db;
+    assert.ok(server && server.command === "node", "mcpServers.db 가 node 로 뜬다");
+    assert.ok(existsSync(join(root, String(server.args[0]).replace("${CLAUDE_PLUGIN_ROOT}/", ""))), "서버 파일이 플러그인 안에 있다");
+    for (const key of fields) assert.equal(server.env[`AXNAVI_${key.toUpperCase()}`], `\${user_config.${key}}`, `${key} 가 서버 env 로 넘어간다`);
   });
 
   register("마켓플레이스가 저장소 루트 플러그인을 설치 대상으로 가리킨다", () => {

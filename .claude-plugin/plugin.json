@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "ax-navi",
   "displayName": "AX Navi",
-  "version": "0.3.10",
-  "description": "ITO/SI/SM 레거시를 위한 Claude Code 플러그인 — 19 agents + 17 workflow skills + 7 단축 별칭. 인덱스 2.0(문자열 디스패치 · 위치로 읽는 화면 · 저장소를 넘는 impact), 고친 뒤 확인 훅",
+  "version": "0.3.11",
+  "description": "ITO/SI/SM 레거시를 위한 Claude Code 플러그인 — 19 agents + 17 workflow skills + 7 단축 별칭. 인덱스 2.0(문자열 디스패치 · 위치로 읽는 화면 · 저장소를 넘는 impact), 고친 뒤 확인 훅, Oracle DB 도구(패키지·프로시저·트리거·의존·배치 잡, 읽기 전용)",
   "author": {
     "name": "Malburi",
     "url": "https://github.com/Malburi"
@@ -21,5 +21,28 @@
     "migration",
     "code-analysis",
     "sql-review"
-  ]
+  ],
+  "userConfig": {
+    "db_host": { "type": "string", "title": "Oracle 호스트 (비우면 DB 도구 끔)", "description": "DB 서버 주소. 비워 두면 DB 도구는 꺼진 채로 있습니다. 프로젝트 .env 의 ORACLE_* 가 있으면 그쪽이 우선합니다.", "default": "" },
+    "db_port": { "type": "string", "title": "Oracle 포트", "description": "리스너 포트", "default": "1521" },
+    "db_service": { "type": "string", "title": "Oracle 서비스 이름", "description": "서비스 이름(SID 가 아니라 SERVICE_NAME)", "default": "" },
+    "db_user": { "type": "string", "title": "DB 계정 (읽기 전용 권장)", "description": "CREATE SESSION + SELECT_CATALOG_ROLE 만 가진 읽기 전용 계정을 권합니다.", "default": "" },
+    "db_password": { "type": "string", "title": "DB 비밀번호", "description": "보안 저장소에 보관되고 설정 파일에는 남지 않습니다.", "sensitive": true, "default": "" },
+    "db_owners": { "type": "string", "title": "분석할 스키마", "description": "쉼표로 구분한 소유자(스키마) 이름. 비우면 접속 계정의 스키마.", "default": "" }
+  },
+  "mcpServers": {
+    "db": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/packages/db-mcp/server.mjs"],
+      "env": {
+        "AXNAVI_DB_HOST": "${user_config.db_host}",
+        "AXNAVI_DB_PORT": "${user_config.db_port}",
+        "AXNAVI_DB_SERVICE": "${user_config.db_service}",
+        "AXNAVI_DB_USER": "${user_config.db_user}",
+        "AXNAVI_DB_PASSWORD": "${user_config.db_password}",
+        "AXNAVI_DB_OWNERS": "${user_config.db_owners}",
+        "CLAUDE_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
 }
