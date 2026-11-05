@@ -15,6 +15,7 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { recommendedAreaCount } from "./report-depth.mjs";
 
 /* 업무가 아니라 계층·관례를 뜻하는 경로 구간. 대소문자 무시. */
 const LAYER_WORDS = new Set([
@@ -171,10 +172,11 @@ export function filesFromIndex(root) {
 }
 
 function parseArgs(argv) {
-  const out = { root: process.cwd(), max: 7, out: null };
+  /* max: "auto"(기본) 면 소스 규모에 맞춰 정한다 — 작은 프로젝트에 영역 7개를 권하지 않는다. */
+  const out = { root: process.cwd(), max: "auto", out: null };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--root") out.root = resolve(argv[++i]);
-    else if (argv[i] === "--max") out.max = Number(argv[++i]) || 7;
+    else if (argv[i] === "--max") { const value = argv[++i]; out.max = value === "auto" ? "auto" : (Number(value) || 7); }
     else if (argv[i] === "--out") out.out = argv[++i];
   }
   return out;
@@ -187,7 +189,9 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.
     process.stderr.write("인덱스에 파일 정보가 없어 영역을 나눌 수 없다(_workspace/index/symbols.json 확인)\n");
     process.exit(2);
   }
-  const result = splitAreas(files, { max: args.max });
+  const sourceFiles = readJson(join(args.root, "_workspace", "index", "_meta.json"))?.source_file_count ?? files.length;
+  const max = args.max === "auto" ? recommendedAreaCount(sourceFiles) : args.max;
+  const result = { ...splitAreas(files, { max }), max_areas: max, max_basis: args.max === "auto" ? `소스 ${sourceFiles}파일 → 파일 400개당 영역 1개(1~7)` : "지정값" };
   /* 프레임워크 힌트: Struts 설정 파일은 업무 단위로 나뉘어 있는 경우가 많아 영역 이름을 붙일 때 참고가 된다. */
   const actconf = files.map((item) => item.path).filter((path) => /(?:^|\/)actconf\/[^/]+\.xml$/i.test(path.replace(/\\/g, "/")));
   const output = { ...result, hints: { struts_actconf: [...new Set(actconf)].sort() } };

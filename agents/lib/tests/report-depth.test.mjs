@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isStubSection, measureDepth, splitSections } from "../report-depth.mjs";
+import { isStubSection, measureDepth, recommendedAreaCount, splitSections } from "../report-depth.mjs";
 import { mergeDeep } from "../merge-deep.mjs";
 import { splitAreas } from "../area-split.mjs";
 
@@ -53,6 +53,14 @@ ${"| 정원 초과 | CHK3 이면 신청 차단 | ApplyApproveService.java:3340 |
 - 신청 판정 프로시저 내부는 이 저장소에서 확인 불가.
 `;
 
+/* 필수 절 filled 개를 서술로 채우고 나머지는 "미수행."으로 두며, 근거 citations 건을 첫 절에 넣은 리포트. */
+function makeReport({ filled = 5, citations = 0 } = {}) {
+  const names = ["업무 개요", "업무별 흐름", "업무 규칙", "B. 비동기/스케줄/이벤트", "B. 인증/인가 경로"];
+  const cites = Array.from({ length: citations }, (_, i) => `Svc${i}.java:${i + 1}`).join(" ");
+  const sections = names.map((name, i) => `## ${name}\n${i < filled ? `영역 ${i}의 업무는 여러 서비스가 나눠 처리하며 신청과 승인 그리고 취소가 각각 다른 경로로 이어진다. `.repeat(10) + (i === 0 ? cites : "") : "미수행."}\n`);
+  return `=== HARNESS ANALYSIS REPORT ===\n\n${sections.join("\n")}\n=== END REPORT ===\n`;
+}
+
 function setup(report = SHALLOW_REPORT, files = 2000) {
   const root = mkdtempSync(join(tmpdir(), "ax-depth-"));
   write(root, "_workspace/01_analyzer_report.md", report);
@@ -70,8 +78,9 @@ export async function test(register, assert) {
       for (const name of ["업무 개요", "업무별 흐름", "업무 규칙", "비동기/스케줄/이벤트", "인증/인가 경로"]) {
         assert.ok(result.metrics.stub_sections.includes(name), `${name} 이 비어 있다고 판정돼야 한다: ${result.metrics.stub_sections}`);
       }
-      assert.ok(result.findings.some((item) => item.id === "narrative_bytes" && item.status === "FAIL"));
-      assert.ok(result.findings.some((item) => item.id === "citations" && item.status === "FAIL"));
+      assert.ok(result.findings.some((item) => item.id === "required_sections" && item.status === "FAIL"), "필수 절이 둘 이상 비면 막는다");
+      assert.ok(result.findings.some((item) => item.id === "citations" && item.status === "FAIL"), "근거가 하한의 25% 미만이면 막는다");
+      assert.ok(result.findings.some((item) => item.id === "narrative_bytes" && item.status === "WARN"), "서술 분량은 알리기만 한다(경험값)");
       assert.equal(result.remedy?.action, "deep_pass");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -94,7 +103,8 @@ export async function test(register, assert) {
     const small = setup(SHALLOW_REPORT, 100);
     const big = setup(SHALLOW_REPORT, 5000);
     try {
-      assert.equal(measureDepth({ root: small, tier: "Full" }).limits.narrative_bytes, 10000, "하한 바닥");
+      assert.equal(measureDepth({ root: small, tier: "Full" }).limits.narrative_bytes, 3000, "하한 바닥(작은 프로젝트의 정상 리포트가 걸리지 않게 낮게)");
+      assert.equal(measureDepth({ root: small, tier: "Full" }).limits.citations, 8);
       assert.equal(measureDepth({ root: big, tier: "Full" }).limits.narrative_bytes, 30000);
       assert.equal(measureDepth({ root: big, tier: "Standard" }).limits.narrative_bytes, 15000);
       assert.equal(measureDepth({ root: big, tier: "Standard" }).verdict, "WARN", "Standard 는 막지 않고 알린다");
@@ -176,6 +186,134 @@ export async function test(register, assert) {
     const tiny = splitAreas([{ path: "src/A.java" }, { path: "src/B.java" }], { max: 6 });
     assert.equal(tiny.areas.length, 1);
     assert.equal(splitAreas([]).areas.length, 0);
+  });
+
+  /*
+   * 보정(2026-11-06): 게이트가 작은 프로젝트에서 거의 항상 걸리고, 처방(영역 7개 심층)이 규모와 무관하게 컸다.
+   * 규모와 무관한 신호(빈 필수 절·근거)만 막고, 규모에 비례하는 경험값(서술 분량)은 알리기만 한다.
+   */
+  register("깊이 게이트: 소규모 프로젝트(300파일 미만)는 막지 않고 알린다 — FAIL 을 WARN 으로 낮추고 처방을 내지 않는다", () => {
+    const root = setup(SHALLOW_REPORT, 120);
+    try {
+      const result = measureDepth({ root, tier: "Full" });
+      assert.equal(result.verdict, "WARN", JSON.stringify(result.findings));
+      assert.equal(result.small_project, true);
+      assert.equal(result.downgraded_to_warn, true);
+      assert.equal(result.remedy, null, "작은 프로젝트에 심층 패스를 권하지 않는다");
+      assert.ok(result.findings.some((item) => item.detail.includes("소규모 프로젝트라 막지 않음")), "낮췄다는 사실을 남긴다");
+      const run = spawnSync(process.execPath, [join(LIB, "report-depth.mjs"), "--root", root], { encoding: "utf8" });
+      assert.equal(run.status, 0, "WARN 은 exit 0");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("깊이 게이트: 막는 신호는 규모와 무관한 둘뿐이다 — 빈 필수 절 2개 이상, 근거가 하한의 25% 미만", () => {
+    /* 1,000파일: 근거 하한 17(25% = 4.25), 서술 하한 6,000B */
+    const cases = [
+      [{ filled: 5, citations: 20 }, "PASS"],
+      [{ filled: 4, citations: 20 }, "WARN"],
+      [{ filled: 3, citations: 20 }, "FAIL"],
+      [{ filled: 5, citations: 2 }, "FAIL"],
+      [{ filled: 5, citations: 8 }, "WARN"],
+    ];
+    for (const [options, expected] of cases) {
+      const root = setup(makeReport(options), 1000);
+      try {
+        const result = measureDepth({ root, tier: "Full" });
+        assert.equal(result.verdict, expected, `${JSON.stringify(options)} → ${JSON.stringify(result.findings.filter((item) => item.status !== "PASS"))}`);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  register("깊이 게이트: 서술 분량이 하한에 못 미쳐도 막지 않고 WARN 만 낸다(프로젝트 둘로 정한 경험값이라 1차 신호가 아니다)", () => {
+    const root = setup(makeReport({ filled: 5, citations: 100 }), 5000);
+    try {
+      const result = measureDepth({ root, tier: "Full" });
+      assert.equal(result.verdict, "WARN");
+      assert.equal(result.findings.find((item) => item.id === "narrative_bytes").status, "WARN");
+      assert.equal(result.remedy, null);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("깊이 게이트: 처방 크기는 규모에 맞는다 — 영역 수는 파일 400개당 1개(1~7), 견적이 작으면 확인 없이 진행한다", () => {
+    for (const [files, areas] of [[0, 1], [100, 1], [400, 1], [600, 2], [1200, 3], [2737, 7], [5000, 7]]) {
+      assert.equal(recommendedAreaCount(files), areas, `${files}파일`);
+    }
+    const mid = setup(SHALLOW_REPORT, 500);
+    const big = setup(SHALLOW_REPORT, 2737);
+    try {
+      const small = measureDepth({ root: mid, tier: "Full" });
+      assert.equal(small.remedy.areas, 1);
+      assert.equal(small.remedy.estimated_tokens, 250000);
+      assert.equal(small.remedy.confirm_required, false, "견적 30만 토큰 이하는 묻지 않는다");
+      const large = measureDepth({ root: big, tier: "Full" });
+      assert.equal(large.remedy.areas, 7);
+      assert.equal(large.remedy.estimated_tokens, 1750000);
+      assert.equal(large.remedy.confirm_required, true, "견적이 크면 사용자 확인이 필요하다");
+    } finally {
+      rmSync(mid, { recursive: true, force: true });
+      rmSync(big, { recursive: true, force: true });
+    }
+  });
+
+  register("깊이 게이트: 사용자가 심층 패스를 거절하면 declined 로 기록하고 처방을 비운다(판정은 그대로 FAIL)", () => {
+    const root = setup(SHALLOW_REPORT, 2000);
+    try {
+      const result = measureDepth({ root, tier: "Full", declined: true });
+      assert.equal(result.verdict, "FAIL", "얕다는 사실은 숨기지 않는다");
+      assert.equal(result.declined, true);
+      assert.equal(result.remedy, null, "처방을 비워 Phase 4 가 같은 일을 또 시키지 않게 한다");
+      const run = spawnSync(process.execPath, [join(LIB, "report-depth.mjs"), "--root", root, "--declined"], { encoding: "utf8" });
+      assert.equal(run.status, 1, "FAIL 이라 exit 1");
+      const saved = JSON.parse(readFileSync(join(root, "_workspace", "report_depth.json"), "utf8"));
+      assert.equal(saved.declined, true);
+      assert.equal(saved.remedy, null);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("깊이 게이트: indexer-config.json 의 depth_gate 로 끄거나 하한을 조정할 수 있다", () => {
+    const root = setup(SHALLOW_REPORT, 2000);
+    const config = (value) => write(root, "_workspace/indexer-config.json", JSON.stringify({ depth_gate: value }));
+    try {
+      assert.equal(measureDepth({ root, tier: "Full" }).verdict, "FAIL", "설정 없으면 기본값");
+      config({ enabled: false });
+      assert.equal(measureDepth({ root, tier: "Full" }).verdict, "SKIPPED");
+      assert.equal(spawnSync(process.execPath, [join(LIB, "report-depth.mjs"), "--root", root], { encoding: "utf8" }).status, 0, "끄면 exit 0");
+      config({ small_project_files: 5000 });
+      assert.equal(measureDepth({ root, tier: "Full" }).verdict, "WARN", "소규모 기준을 올려 완화");
+      config({ min_stub_sections: 9, citations: 0 });
+      assert.equal(measureDepth({ root, tier: "Full" }).verdict, "WARN", "막는 기준을 직접 조정");
+      config({ narrative_bytes: 100 });
+      assert.equal(measureDepth({ root, tier: "Full" }).limits.narrative_bytes, 100);
+      config({ narrative_bytes: "abc", citations: -5 });
+      assert.equal(measureDepth({ root, tier: "Full" }).limits.narrative_bytes, 12000, "잘못된 값은 무시한다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("영역 분할 CLI: --max 를 주지 않으면 소스 규모로 영역 수를 정한다(작은 프로젝트는 1개)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-depth-"));
+    try {
+      write(root, "_workspace/index/_meta.json", JSON.stringify({ source_file_count: 80 }));
+      const symbols = ["a", "b", "c"].flatMap((dir) => Array.from({ length: 10 }, (_, i) => ({ id: `${dir}.C${i}`, file: `src/${dir}/C${i}.java` })));
+      write(root, "_workspace/index/symbols.json", JSON.stringify({ symbols }));
+      const run = (...extra) => JSON.parse(spawnSync(process.execPath, [join(LIB, "area-split.mjs"), "--root", root, ...extra], { encoding: "utf8" }).stdout);
+      const auto = run();
+      assert.equal(auto.max_areas, 1);
+      assert.equal(auto.areas.length, 1, "작은 프로젝트에 영역을 여럿 만들지 않는다");
+      assert.equal(run("--max", "3").areas.length, 3, "명시하면 그대로");
+      assert.equal(run("--max", "3").max_areas, 3);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   register("CLI: report-depth 는 얕으면 exit 1, 심층 병합 뒤에는 exit 0 이고 report_depth.json 을 남긴다", () => {

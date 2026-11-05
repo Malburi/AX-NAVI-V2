@@ -506,14 +506,18 @@ Agent(
 
 | `depth:` | 동작 |
 |---|---|
-| `PASS` · `WARN` | 2-5 로 진행. `WARN`은 Phase 3 보고에 사유를 적는다 |
-| `skipped` | node 없음 등 — 게이트 없이 진행하고 Phase 3 보고에 "깊이 미측정"을 적는다 |
-| `FAIL` | 아래 **심층 패스**. 건너뛰려면 사용자가 거절해야 하며, 거절·답할 사람이 없는 실행이면 실행하지 않고 Phase 3 보고에 "분석 깊이 미달 — 심층 패스 미실행"을 FAIL 로 명시한다(평가는 `report_depth.json`으로 총점을 79 이하로 제한한다) |
+| `PASS` | 2-5 로 진행 |
+| `WARN` | 2-5 로 진행. Phase 3 보고에 사유를 적는다. **소규모 프로젝트(소스 300파일 미만)는 FAIL 이 WARN 으로 낮춰진다** — 이때 `report_depth.json`에 `downgraded_to_warn: true`가 있고 심층 패스를 권하지 않는다(작은 시스템에 큰 비용을 권하지 않기 위해서다). 보고에 "소규모라 깊이 미달을 막지 않음"을 적는다 |
+| `SKIPPED` · `skipped` | `indexer-config.json`의 `depth_gate.enabled: false`이거나 node 없음 — 게이트 없이 진행하고 Phase 3 보고에 "깊이 미측정"을 적는다 |
+| `FAIL` | 아래 **심층 패스**. 처방(`report_depth.json`의 `remedy`)이 영역 수·견적·확인 필요 여부를 준다 |
 
-**심층 패스 (LLM 호출 — 비용이 크므로 실행 전에 사용자에게 보인다)**
+**막는 기준과 알리는 기준은 다르다.** FAIL 은 규모와 무관한 둘뿐이다 — 비어 있는 필수 절이 둘 이상, 또는 `파일:줄` 근거가 하한의 25% 미만. 서술 분량·절 하나 비음·"미수행" 표현은 WARN 만 낸다(서술 하한은 프로젝트 둘로 정한 경험값이라 1차 신호가 아니다). 하한은 `indexer-config.json`의 `depth_gate`로 조정하거나 끌 수 있다.
 
-1. 영역 분할(결정론적, 메인에서 직접): `node "[plugin_root]/agents/lib/area-split.mjs" --root "[root]" --max 7 --out "_workspace/areas.json"`. 결과는 **출발점**이다 — 이름이 모호하거나 같은 업무가 갈라졌으면 `hints.struts_actconf`·기존 도메인 문서(`DOMAIN.md` 등)를 보고 합치거나 이름을 바로잡는다. 여기에 횡단 영역(요청 골격·배치/스케줄·외부 연동·보안)과 데이터 모델(쿼리에서 역추적, DDL 이 없을 때) 영역을 각각 1개 더한다.
-2. 견적을 보이고 확인받는다(`AskUserQuestion`, 한국어): 영역 수 × 영역당 약 100~250K 토큰·10~15분(병렬). "진행 / 영역 수 줄여서 진행 / 건너뛰기".
+**심층 패스 (LLM 호출)**
+
+1. 영역 분할(결정론적, 메인에서 직접): `node "[plugin_root]/agents/lib/area-split.mjs" --root "[root]" --max auto --out "_workspace/areas.json"`. `--max auto`는 소스 규모로 영역 수를 정한다(파일 400개당 1개, 1~7 — `remedy.areas`와 같다). 결과는 **출발점**이다 — 이름이 모호하거나 같은 업무가 갈라졌으면 `hints.struts_actconf`·기존 도메인 문서(`DOMAIN.md` 등)를 보고 합치거나 이름을 바로잡는다. 영역이 3개 이상인 큰 프로젝트에서는 횡단 영역(요청 골격·배치/스케줄·외부 연동·보안)과 데이터 모델(쿼리에서 역추적, DDL 이 없을 때) 영역을 각각 1개 더한다 — 영역이 1~2개인 작은 프로젝트에는 더하지 않는다.
+2. 견적(`remedy.estimated_tokens` — 영역당 약 25만 토큰, 실측 평균 26.6만)을 사용자에게 알린다. **`remedy.confirm_required`가 `false`(견적 30만 토큰 이하, 영역 1개)이면 묻지 않고 알린 뒤 바로 진행한다.** `true`이면 `AskUserQuestion`(한국어)으로 확인한다: "진행 / 영역 수 줄여서 진행 / 건너뛰기".
+   - **건너뛰기를 고르거나, 답할 사람이 없는 실행이면 심층 패스를 하지 않고** `node "[plugin_root]/agents/lib/report-depth.mjs" --root "[root]" --tier "[tier]" --declined`로 다시 측정해 `declined: true`를 남긴다(처방이 비워진다). 평가는 이때 총점 상한 없이 -5점만 매기고 `fix_targets`에 심층 분석 행을 만들지 않으므로 Phase 4 가 같은 일을 다시 시키지 않는다. Phase 3 보고에는 "분석 깊이 미달 — 심층 패스 미실행(사용자 거절)"을 FAIL 로 숨김없이 적는다.
 3. 영역마다 `analyzer`를 **같은 메시지에서 병렬로** 호출한다(레인이 여럿이면 레인별로 따로, 같은 규칙):
    ```
    Agent(
@@ -798,6 +802,8 @@ harness-evaluator가 이미 `analyzer` fix_target을 반환했으면 이 게이�
 | 80~100 (PASS) | 완료 | Phase 3 보고 그대로 사용자에게 전달 |
 | 60~79 (PARTIAL) | 타겟 재생성 | fix_targets 기반 특정 에이전트 재실행 → 재평가 (1회) |
 | 0~59 (RETRY) | 주요 재생성 | fix_targets 상위 2개 에이전트 재실행 → 재평가 (1회) |
+
+**깊이 게이트와의 관계:** 2-4.5 에서 사용자가 심층 패스를 거절해 `report_depth.json`에 `declined: true`가 있으면, 평가는 총점 상한 없이 -5점만 매기고 `fix_targets`에 `analyzer`(심층 분석) 행을 만들지 않는다. 그래도 그런 행이 반환됐다면 **실행하지 않는다** — 이미 사용자가 거절한 비용이 큰 작업을 Phase 4 가 되살려서는 안 된다. 심층 패스를 이미 마쳐 깊이 게이트가 `PASS`인데 점수가 낮은 경우는 다른 차원의 문제이므로 이 규칙과 무관하다.
 
 ### 타겟 재생성 실행 (PARTIAL/RETRY)
 
