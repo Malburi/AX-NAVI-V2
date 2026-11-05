@@ -499,6 +499,36 @@ Agent(
 
 > QA(경계면 교차 비교)는 더 이상 Phase 2에서 자동 실행하지 않는다. Agent 호출 방법은 Phase 3.6 "선택 작업 안내"에서 사용자가 선택했을 때만 참조한다 — 토큰 절감을 위해 Tier와 무관하게 항상 온디맨드다.
 
+### 2-4.5. 분석 깊이 게이트 (평가 전에, 인덱스 무결성 게이트와 같은 층)
+
+2-3.5 `block: verify`의 반환 `depth:`가 `FAIL`이면 분석 리포트가 얕다는 뜻이다 — 인덱스 요약만 옮기고 `업무 규칙`·`업무별 흐름`·배치·인증 절이 "미수행·확인 범위 밖"이거나 `파일:줄` 근거가 거의 없다.
+평가(2-5)는 인용 경로의 존재·트리거 수 같은 정확성·형식만 보므로 이 상태도 통과시켰다(실측: 소스 2,737파일, 리포트 6KB, 84점 PASS). 그래서 평가 **전에** 여기서 막는다. 평가보다 앞이어야 `domain-expert.md`·`CLAUDE.md`가 보완된 리포트로 조립되고, 분리 저장소의 파트너 연동 절(P-PAIR)이 재조립에 덮어써지지 않는다.
+
+| `depth:` | 동작 |
+|---|---|
+| `PASS` · `WARN` | 2-5 로 진행. `WARN`은 Phase 3 보고에 사유를 적는다 |
+| `skipped` | node 없음 등 — 게이트 없이 진행하고 Phase 3 보고에 "깊이 미측정"을 적는다 |
+| `FAIL` | 아래 **심층 패스**. 건너뛰려면 사용자가 거절해야 하며, 거절·답할 사람이 없는 실행이면 실행하지 않고 Phase 3 보고에 "분석 깊이 미달 — 심층 패스 미실행"을 FAIL 로 명시한다(평가는 `report_depth.json`으로 총점을 79 이하로 제한한다) |
+
+**심층 패스 (LLM 호출 — 비용이 크므로 실행 전에 사용자에게 보인다)**
+
+1. 영역 분할(결정론적, 메인에서 직접): `node "[plugin_root]/agents/lib/area-split.mjs" --root "[root]" --max 7 --out "_workspace/areas.json"`. 결과는 **출발점**이다 — 이름이 모호하거나 같은 업무가 갈라졌으면 `hints.struts_actconf`·기존 도메인 문서(`DOMAIN.md` 등)를 보고 합치거나 이름을 바로잡는다. 여기에 횡단 영역(요청 골격·배치/스케줄·외부 연동·보안)과 데이터 모델(쿼리에서 역추적, DDL 이 없을 때) 영역을 각각 1개 더한다.
+2. 견적을 보이고 확인받는다(`AskUserQuestion`, 한국어): 영역 수 × 영역당 약 100~250K 토큰·10~15분(병렬). "진행 / 영역 수 줄여서 진행 / 건너뛰기".
+3. 영역마다 `analyzer`를 **같은 메시지에서 병렬로** 호출한다(레인이 여럿이면 레인별로 따로, 같은 규칙):
+   ```
+   Agent(
+     subagent_type="ax-navi:analyzer",
+     description="T-A-DEEP · analyzer · [영역명] 심층 분석",
+     prompt="<mode: deep. 프로젝트 루트: [절대경로]. 영역: [AREA id·이름·포함 경로·sample_files]. 출력: _workspace/deep/[NN_영역].md.
+     analyzer.md의 'deep 모드 계약'을 따른다 — 최소 25개 파일을 직접 열고 모든 사실에 파일:줄 근거, 프로시저 내부는 확인 불가로 표시, 소스 수정 금지.
+     참고 문서(도메인 문서)가 있으면 가설로만 쓰고 코드로 검증한다.>",
+     model="sonnet"
+   )
+   ```
+   AI 예산 장부(`ai-budget.mjs`)의 `retries` 한도(2)는 이 패스의 호출 수를 감당하지 못하므로 **claim 대상이 아니다** — 사용자 승인이 그 역할을 한다. 실제 소비는 `record --role analyzer --spent-tokens`로 남긴다.
+4. 전부 반환되면: `node "[plugin_root]/agents/lib/merge-deep.mjs" --root "[root]"`(리포트에 발췌 병합, 비어 있던 절은 포인터로 교체) → `pipeline-runner` `block: assemble`(domain-expert·`CLAUDE.md` 재조립) → `block: verify`(깊이 재측정).
+5. 재측정도 `FAIL`이면 추가 재시도 없이 Phase 3 보고에 잔존 이슈로 명시하고 진행한다.
+
 ### 2-5. harness-evaluator 호출 (모든 Tier)
 
 validator 완료 후 실행:

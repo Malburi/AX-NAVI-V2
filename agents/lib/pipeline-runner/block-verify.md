@@ -30,6 +30,17 @@ node "[plugin_root]/agents/lib/validate-harness.mjs" --root "[root]" --plugin-ro
 
 `_workspace/index/*.json`을 `docs/index-schema/*.json` 대조로 검증한다. `validator_checks.py`의 check7/7b(실제 소스 대조, 내용 정확성)와 겹치지 않는 별개 층(형태 검증)이라 병행한다.
 
+## Step 4 — 분석 리포트 깊이 (깊이 게이트)
+
+node ≥ 18일 때만. 분석 리포트가 "얼마나 읽고 썼나"를 숫자로 잰다. 인덱스 요약만 옮기고 절을 비운 리포트가 평가를 통과하던 구멍을 막는 결정론적 검사다(LLM 없음).
+
+```powershell
+node "[plugin_root]/agents/lib/report-depth.mjs" --root "[root]" --tier "[tier]"
+```
+
+결과는 `_workspace/report_depth.json`에 남는다. **exit 1(FAIL)은 스크립트 실패가 아니라 "얕다"는 판정이다** — 파일은 정상으로 쓰이고 이 블록은 재시도하지 않는다. exit 2는 리포트가 없다는 뜻이다(WARN 후 계속).
+`remedy.action`이 `deep_pass`이면 처방은 오케스트레이터의 몫이다 — 이 블록이 영역 분할·심층 분석을 직접 하지 않는다(그건 LLM 호출이라 pipeline-runner 범위 밖).
+
 ## 반환 형식
 
 Phase 4의 인덱스 무결성 게이트가 이 값들로 분기하므로 **필드를 임의로 생략하지 않는다.**
@@ -42,6 +53,7 @@ mechanical: index_integrity_fail=[true|false] index_spotcheck_fail=[true|false]
 mechanical_gate_warns: [ "analyzer.md Step 8 참고" 또는 "generated_at" 문구를 포함한 warn만 원문 그대로, 없으면 "없음" ]
 schema: failures=[N] plugin_contract_failures=[N] | skipped(node 없음)
 schema_fail_messages: [failures > 0일 때만, FAIL 메시지 원문 최대 10줄]
+depth: PASS | WARN | FAIL | skipped(node 없음·리포트 없음) (서술 [N]B/하한 [N]B, 근거 [N]건/하한 [N], 빈 필수 절: [목록 또는 없음])
 WARN: [없으면 "없음"]
 ```
 
