@@ -526,7 +526,9 @@ Agent(
    )
    ```
    AI 예산 장부(`ai-budget.mjs`)의 `retries` 한도(2)는 이 패스의 호출 수를 감당하지 못하므로 **claim 대상이 아니다** — 사용자 승인이 그 역할을 한다. 실제 소비는 `record --role analyzer --spent-tokens`로 남긴다.
-4. 전부 반환되면: `node "[plugin_root]/agents/lib/merge-deep.mjs" --root "[root]"`(리포트에 발췌 병합, 비어 있던 절은 포인터로 교체) → `pipeline-runner` `block: assemble`(domain-expert·`CLAUDE.md` 재조립) → `block: verify`(깊이 재측정).
+4. 전부 반환되면: `node "[plugin_root]/agents/lib/merge-deep.mjs" --root "[root]"`(리포트에 발췌 병합, 비어 있던 절은 포인터로 교체) → **`writer` 재실행(필드만)** → `pipeline-runner` `block: assemble` → `block: verify`(깊이 재측정).
+   - `writer` 재실행을 건너뛰면 `domain-expert.md`만 커지고 **`CLAUDE.md`는 얕은 채로 남는다**(실측: 재평가에서 컨텍스트 품질이 오르지 않고, 클라이언트는 심층 분석이 밝힌 실제 jQuery 버전·죽은 JS 후보가 `CLAUDE.md`에 없어 오히려 2점 내려갔다). 호출은 `agents/writer.md`의 범위를 `_workspace/claude_md_fields.json`의 `tech_stack_summary`·`file_locations_rows`·`cautions`로 **좁혀서** 부른다 — 스킬 파일·패턴·`writer_decisions.json`은 건드리지 않는다. 지시: "`_workspace/deep/*.md`를 읽고 이 세 필드를 갱신하라. `cautions`는 매 세션 로드되므로 25줄 이내로 가장 중요한 사실·위험만 쓰고 각 줄 끝에 근거 절(`deep/파일 §번호`)을 단다."
+   - `block: assemble`은 `CLAUDE.md`를 통째로 다시 만들어 **파트너 연동 절(`## 파트너 프로젝트`)의 상세 항목을 덮어쓴다**. 분리 저장소에서 P-PAIR 이후에 이 패스를 돌렸다면 재조립 전 그 절을 보관했다가 복원한다. 이 게이트를 2-4.5(평가 전, P-PAIR 전)에서 돌리는 이유가 이것이다.
 5. 재측정도 `FAIL`이면 추가 재시도 없이 Phase 3 보고에 잔존 이슈로 명시하고 진행한다.
 
 ### 2-5. harness-evaluator 호출 (모든 Tier)
