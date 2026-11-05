@@ -507,7 +507,7 @@ Agent(
 | `depth:` | 동작 |
 |---|---|
 | `PASS` | 2-5 로 진행 |
-| `WARN` | 2-5 로 진행. Phase 3 보고에 사유를 적는다. **소규모 프로젝트(소스 300파일 미만)는 FAIL 이 WARN 으로 낮춰진다** — 이때 `report_depth.json`에 `downgraded_to_warn: true`가 있고 심층 패스를 권하지 않는다(작은 시스템에 큰 비용을 권하지 않기 위해서다). 보고에 "소규모라 깊이 미달을 막지 않음"을 적는다 |
+| `WARN` | 2-5 로 진행. Phase 3 보고에 사유를 적는다. 규모로 FAIL 을 낮추지 않는다 — 작은 프로젝트도 똑같이 막고, 대신 처방이 영역 1개·30만 토큰 이하로 작게 나와 확인 없이 진행된다. 프로젝트가 `indexer-config.json`의 `small_project_files`(옵트인, 기본 꺼짐)를 켰을 때만 `downgraded_to_warn: true`로 낮춰지며, 그때는 보고에 "소규모라 깊이 미달을 막지 않음"을 적는다 |
 | `SKIPPED` · `skipped` | `indexer-config.json`의 `depth_gate.enabled: false`이거나 node 없음 — 게이트 없이 진행하고 Phase 3 보고에 "깊이 미측정"을 적는다 |
 | `FAIL` | 아래 **심층 패스**. 처방(`report_depth.json`의 `remedy`)이 영역 수·견적·확인 필요 여부를 준다 |
 

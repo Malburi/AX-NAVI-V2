@@ -192,17 +192,27 @@ export async function test(register, assert) {
    * 보정(2026-11-06): 게이트가 작은 프로젝트에서 거의 항상 걸리고, 처방(영역 7개 심층)이 규모와 무관하게 컸다.
    * 규모와 무관한 신호(빈 필수 절·근거)만 막고, 규모에 비례하는 경험값(서술 분량)은 알리기만 한다.
    */
-  register("깊이 게이트: 소규모 프로젝트(300파일 미만)는 막지 않고 알린다 — FAIL 을 WARN 으로 낮추고 처방을 내지 않는다", () => {
+  register("깊이 게이트: 소규모 프로젝트도 얕으면 똑같이 막고, 처방은 영역 1개로 작게 나와 확인 없이 진행한다", () => {
     const root = setup(SHALLOW_REPORT, 120);
     try {
       const result = measureDepth({ root, tier: "Full" });
-      assert.equal(result.verdict, "WARN", JSON.stringify(result.findings));
-      assert.equal(result.small_project, true);
-      assert.equal(result.downgraded_to_warn, true);
-      assert.equal(result.remedy, null, "작은 프로젝트에 심층 패스를 권하지 않는다");
-      assert.ok(result.findings.some((item) => item.detail.includes("소규모 프로젝트라 막지 않음")), "낮췄다는 사실을 남긴다");
+      assert.equal(result.verdict, "FAIL", JSON.stringify(result.findings));
+      assert.equal(result.downgraded_to_warn, false, "기본값은 규모로 FAIL 을 낮추지 않는다");
+      assert.equal(result.remedy.areas, 1);
+      assert.equal(result.remedy.confirm_required, false, "작은 프로젝트는 묻지 않고 심층 패스를 진행한다");
       const run = spawnSync(process.execPath, [join(LIB, "report-depth.mjs"), "--root", root], { encoding: "utf8" });
-      assert.equal(run.status, 0, "WARN 은 exit 0");
+      assert.equal(run.status, 1, "FAIL 은 exit 1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  register("깊이 게이트: 작은 프로젝트의 정상적인 짧은 리포트는 막지 않는다(서술 분량은 WARN 만)", () => {
+    const root = setup(makeReport({ filled: 5, citations: 12 }), 120);
+    try {
+      const result = measureDepth({ root, tier: "Full" });
+      assert.ok(result.verdict !== "FAIL", JSON.stringify(result.findings));
+      assert.equal(result.remedy, null);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -287,7 +297,9 @@ export async function test(register, assert) {
       assert.equal(measureDepth({ root, tier: "Full" }).verdict, "SKIPPED");
       assert.equal(spawnSync(process.execPath, [join(LIB, "report-depth.mjs"), "--root", root], { encoding: "utf8" }).status, 0, "끄면 exit 0");
       config({ small_project_files: 5000 });
-      assert.equal(measureDepth({ root, tier: "Full" }).verdict, "WARN", "소규모 기준을 올려 완화");
+      const relaxed = measureDepth({ root, tier: "Full" });
+      assert.equal(relaxed.verdict, "WARN", "소규모 완화는 옵트인으로만 켠다");
+      assert.equal(relaxed.downgraded_to_warn, true);
       config({ min_stub_sections: 9, citations: 0 });
       assert.equal(measureDepth({ root, tier: "Full" }).verdict, "WARN", "막는 기준을 직접 조정");
       config({ narrative_bytes: 100 });

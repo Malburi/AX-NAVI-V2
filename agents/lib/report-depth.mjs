@@ -11,12 +11,13 @@
  *   막는다(FAIL):  필수 절이 둘 이상 비어 있다 / `파일:줄` 근거가 하한의 25% 에도 못 미친다
  *   알린다(WARN):  서술 분량이 하한 미만 / 필수 절 하나가 비었다 / "미수행" 류 표현이 많다
  * 서술 분량 하한은 프로젝트 둘의 실측으로 정한 경험값이라 1차 신호로 쓰면 작은 프로젝트의 정상적인 짧은 리포트를 막는다.
- * 소스가 `small_project_files`(기본 300) 미만이면 FAIL 도 WARN 으로 낮춘다 — 작은 시스템에 큰 심층 패스를 권하지 않는다.
+ * 작은 프로젝트도 똑같이 막는다 — 분석은 규모와 무관하게 있어야 하고, 작은 시스템의 심층 패스는 영역 1개·30만 토큰 이하라
+ * 확인 없이 자동 진행되므로 비용이 막을 이유가 못 된다(처방 크기는 규모를 따라 줄어든다). FAIL 을 낮추는 건 옵트인(`small_project_files`)이다.
  *
  * 설정: `_workspace/indexer-config.json` 의 `depth_gate`
  *   { "enabled": false }                    게이트를 끈다(verdict SKIPPED)
  *   { "narrative_bytes": N, "citations": N } 하한을 직접 지정
- *   { "small_project_files": N }            이 미만이면 FAIL 을 WARN 으로 낮춤(기본 300)
+ *   { "small_project_files": N }            옵트인: 소스가 N 파일 미만이면 FAIL 을 WARN 으로 낮춤(기본 0 = 낮추지 않음)
  *   { "min_stub_sections": N }              비어 있는 필수 절이 N 개 이상이면 FAIL(기본 2)
  *   { "auto_proceed_tokens": N }            심층 패스 견적이 이 이하면 확인 없이 진행(기본 300000)
  *
@@ -40,7 +41,7 @@ export const REQUIRED_SECTIONS = ["업무 개요", "업무별 흐름", "업무 �
 const MACHINE_BLOCK = /<!--\s*INDEX_SUMMARY_BEGIN\s*-->[\s\S]*?<!--\s*INDEX_SUMMARY_END\s*-->/g;
 const DEEP_BLOCK = /<!--\s*DEEP_BEGIN\s*-->[\s\S]*?<!--\s*DEEP_END\s*-->/g;
 
-const DEFAULTS = { small_project_files: 300, min_stub_sections: 2, auto_proceed_tokens: 300000 };
+const DEFAULTS = { small_project_files: 0, min_stub_sections: 2, auto_proceed_tokens: 300000 };
 /* 영역 하나를 깊이 읽는 데 든 토큰. 실측(2026-11-05 eduLms, 7개 영역 병렬): 187K~326K, 평균 약 266K. 견적용 상수다. */
 export const TOKENS_PER_AREA = 250000;
 
@@ -155,7 +156,7 @@ export function measureDepth({ root, tier = "Full", declined = false }) {
   check("narrative_bytes", narrativeBytes >= limit.narrative_bytes ? "PASS" : "WARN", `서술 ${narrativeBytes}B (하한 ${limit.narrative_bytes}B, 소스 ${sourceFiles}파일${deepFiles.length ? `, 심층 ${deepFiles.length}개 ${deepBytes}B 포함` : ""})`);
   check("stub_phrases", stubHits <= 3 || deepBytes >= limit.narrative_bytes ? "PASS" : "WARN", `'미수행·확인 범위 밖' 류 표현 ${stubHits}회`);
 
-  /* 작은 프로젝트는 막지 않는다: FAIL 을 WARN 으로 낮추되 낮췄다는 사실을 남긴다. */
+  /* 옵트인(small_project_files > 0): 그 값 미만이면 FAIL 을 WARN 으로 낮추되 낮췄다는 사실을 남긴다. 기본은 낮추지 않는다. */
   let downgraded = false;
   if (small) {
     for (const item of findings) if (item.status === "FAIL") { item.status = "WARN"; item.detail += " — 소규모 프로젝트라 막지 않음"; downgraded = true; }
