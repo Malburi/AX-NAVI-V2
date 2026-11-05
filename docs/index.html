@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AX Navi 플러그인</title>
+<meta name="description" content="ITO/SI/SM 레거시 코드베이스를 전수 색인해 지도를 만들고, 그 위에서 찾고·따라가고·안전하게 고치는 Claude Code 플러그인. DB 덤프(Oracle·MSSQL·MySQL·PostgreSQL)까지 같은 지도에 잇습니다.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gothic+A1:wght@500;700;800&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  :root {
+    color-scheme: light;
+    --ground: #F6F7F4;
+    --surface: #FFFFFF;
+    --surface-2: #EEF1EE;
+    --ink: #1B2530;
+    --ink-soft: #46535E;
+    --muted: #6B7882;
+    --line: #D8DEDB;
+    --line-strong: #BCC6C3;
+    --accent: #0F7B85;
+    --accent-ink: #0A5C64;
+    --accent-soft: #E1F0F1;
+    --warn: #B8641E;
+    --warn-soft: #F7E9DC;
+    --route: #0F7B85;
+    --route-track: #CFE3E4;
+    --on-accent: #FFFFFF;
+
+    /* 터미널 판은 두 테마 모두 먹색으로 둔다 — axnavi 가 실제로 도는 곳이다 */
+    --term-bg: #0F171C;
+    --term-bar: #16222A;
+    --term-line: #24343D;
+    --term-ink: #D6DFE4;
+    --term-dim: #7E8F99;
+    --term-cyan: #5CC4CB;
+    --term-green: #86CC92;
+    --term-red: #E5897C;
+    --term-yellow: #E3BC6B;
+
+    --font-display: "Gothic A1", "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    --font-body: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", "D2Coding", Consolas, "Courier New", monospace;
+
+    --wrap: 1160px;
+    --gutter: clamp(18px, 4vw, 40px);
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0E1418;
+      --surface: #151D23;
+      --surface-2: #1B252C;
+      --ink: #E3E9EC;
+      --ink-soft: #B9C4CB;
+      --muted: #8E9CA6;
+      --line: #26323A;
+      --line-strong: #34434C;
+      --accent: #48B7BF;
+      --accent-ink: #7ACFD5;
+      --accent-soft: #123338;
+      --warn: #E0955A;
+      --warn-soft: #3A2A1B;
+      --route: #48B7BF;
+      --route-track: #1D3A3F;
+      --on-accent: #06181A;
+      --term-bg: #0A1014;
+      --term-bar: #111A20;
+      --term-line: #1E2B33;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0E1418;
+    --surface: #151D23;
+    --surface-2: #1B252C;
+    --ink: #E3E9EC;
+    --ink-soft: #B9C4CB;
+    --muted: #8E9CA6;
+    --line: #26323A;
+    --line-strong: #34434C;
+    --accent: #48B7BF;
+    --accent-ink: #7ACFD5;
+    --accent-soft: #123338;
+    --warn: #E0955A;
+    --warn-soft: #3A2A1B;
+    --route: #48B7BF;
+    --route-track: #1D3A3F;
+    --on-accent: #06181A;
+    --term-bg: #0A1014;
+    --term-bar: #111A20;
+    --term-line: #1E2B33;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.7;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+  a { color: var(--accent-ink); text-underline-offset: 3px; }
+  a:hover { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  code, kbd, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+  code { background: var(--surface-2); padding: 1px 6px; border-radius: 5px; color: var(--ink); }
+  h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; color: var(--ink); }
+  p { margin: 0; }
+
+  .wrap { width: 100%; max-width: var(--wrap); margin: 0 auto; padding-inline: var(--gutter); }
+  .skip { position: absolute; left: -999px; top: 8px; background: var(--ink); color: var(--ground); padding: 8px 12px; border-radius: 6px; z-index: 50; }
+  .skip:focus { left: 8px; }
+
+  /* ─── 머리줄 ─── */
+  .top {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20;
+    background: color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter: saturate(1.2) blur(10px);
+    -webkit-backdrop-filter: saturate(1.2) blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .top .wrap { display: flex; align-items: center; gap: 24px; padding-block: 12px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); }
+  .brand-mark { width: 30px; height: 30px; flex: none; }
+  .brand-name { font-family: var(--font-display); font-weight: 800; font-size: 17px; letter-spacing: 0.02em; }
+  .brand-ver { font-family: var(--font-mono); font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+  .nav { display: flex; gap: 22px; margin-left: auto; align-items: center; }
+  .nav a { color: var(--ink-soft); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .nav a:hover { color: var(--accent); }
+  .nav .gh { color: var(--ink); border: 1px solid var(--line-strong); padding: 5px 12px; border-radius: 8px; }
+  @media (max-width: 760px) { .nav a:not(.gh) { display: none; } }
+
+  /* ─── 첫 화면 ─── */
+  .hero { padding-block: clamp(48px, 8vw, 96px) clamp(40px, 6vw, 72px); }
+  .hero .wrap { display: grid; grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 64px); align-items: center; }
+  @media (max-width: 980px) { .hero .wrap { grid-template-columns: minmax(0, 1fr); } }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--font-body); font-weight: 500; font-size: 13.5px; letter-spacing: 0;
+    color: var(--accent-ink); background: var(--accent-soft);
+    padding: 4px 10px; border-radius: 999px;
+  }
+  .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .hero h1 {
+    margin-top: 22px;
+    font-size: clamp(38px, 5.6vw, 66px);
+    line-height: 1.14;
+    letter-spacing: -0.035em;
+    font-weight: 800;
+  }
+  .hero h1 .soft { color: var(--muted); font-weight: 700; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .lede { margin-top: 22px; font-size: clamp(16.5px, 1.5vw, 18.5px); color: var(--ink-soft); max-width: 34em; line-height: 1.75; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    font: 600 15px/1 var(--font-body); text-decoration: none;
+    padding: 13px 18px; border-radius: 10px; border: 1px solid transparent; cursor: pointer;
+  }
+  .btn-primary { background: var(--accent); color: var(--on-accent); }
+  .btn-primary:hover { background: var(--accent-ink); color: var(--on-accent); }
+  .btn-ghost { background: transparent; color: var(--ink); border-color: var(--line-strong); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent-ink); }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin-top: 34px; padding: 0; list-style: none; }
+  .facts li { display: flex; flex-direction: column; }
+  .facts b { font-family: var(--font-display); font-size: 26px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .facts span { font-size: 13px; color: var(--muted); }
+
+  /* ─── 터미널 ─── */
+  .term {
+    background: var(--term-bg); color: var(--term-ink);
+    border-radius: 12px; border: 1px solid var(--term-line);
+    box-shadow: 0 24px 60px -28px rgba(8, 20, 26, 0.55), 0 2px 6px rgba(8, 20, 26, 0.12);
+    overflow: hidden; min-width: 0;
+  }
+  .term-bar {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    background: var(--term-bar); border-bottom: 1px solid var(--term-line);
+    font-family: var(--font-mono); font-size: 12px; color: var(--term-dim);
+  }
+  .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: #2E3E47; display: block; }
+  .term-bar .title { margin-left: 8px; }
+  .term pre {
+    margin: 0; padding: 18px 18px 20px; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 12.8px; line-height: 1.62;
+    white-space: pre; tab-size: 2;
+  }
+  @media (max-width: 520px) { .term pre { font-size: 11.4px; padding: 14px; } }
+  .t-dim { color: var(--term-dim); }
+  .t-cy { color: var(--term-cyan); }
+  .t-gr { color: var(--term-green); }
+  .t-rd { color: var(--term-red); }
+  .t-ye { color: var(--term-yellow); }
+  .t-b { font-weight: 700; color: #F1F5F7; }
+  .t-add { color: var(--term-green); background: rgba(134, 204, 146, 0.10); display: inline-block; width: 100%; }
+  .caret { display: inline-block; width: 0.55em; height: 1.05em; vertical-align: -0.16em; background: var(--term-cyan); animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .caret { animation: none; } }
+
+  /* ─── 절 공통 ─── */
+  section { scroll-margin-top: 72px; }
+  .sec { padding-block: clamp(56px, 8vw, 104px); border-top: 1px solid var(--line); }
+  .sec-head { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 12px 48px; align-items: start; margin-bottom: clamp(32px, 4vw, 48px); }
+  @media (max-width: 820px) { .sec-head { grid-template-columns: minmax(0, 1fr); } }
+  .kicker { font-family: var(--font-display); font-weight: 700; font-size: 14px; letter-spacing: 0; color: var(--accent-ink); padding-top: 10px; display: flex; align-items: center; gap: 10px; }
+  .kicker::before { content: ""; width: 18px; height: 2px; background: var(--accent); border-radius: 1px; }
+  .sec-head h2 { font-size: clamp(28px, 3.6vw, 42px); line-height: 1.22; letter-spacing: -0.028em; font-weight: 800; }
+  .sec-head p { margin-top: 14px; color: var(--ink-soft); font-size: 17px; max-width: 38em; }
+
+  /* ─── 첫 주의 질문 ─── */
+  .asks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border-top: 2px solid var(--ink); }
+  @media (max-width: 820px) { .asks { grid-template-columns: minmax(0, 1fr); } }
+  .ask { padding: 26px 26px 28px 0; display: flex; flex-direction: column; gap: 14px; }
+  .ask + .ask { padding-left: 26px; border-left: 1px solid var(--line); }
+  @media (max-width: 820px) { .ask + .ask { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); } }
+  .ask q { font-family: var(--font-display); font-size: 21px; font-weight: 700; line-height: 1.45; letter-spacing: -0.015em; quotes: "“" "”"; }
+  .ask .who { font-size: 13px; color: var(--muted); }
+  .ask .ans { margin-top: auto; display: flex; align-items: baseline; gap: 10px; font-size: 15px; color: var(--ink-soft); }
+  .ask .ans code { background: var(--accent-soft); color: var(--accent-ink); font-weight: 700; white-space: nowrap; flex: none; }
+
+  /* ─── 노선도 ─── */
+  .route-box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: clamp(22px, 3vw, 36px); }
+  .route-cap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; font-size: 14px; color: var(--muted); margin-bottom: 26px; }
+  .route-cap b { color: var(--ink); font-weight: 700; }
+  .route { position: relative; list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .route::before {
+    content: ""; position: absolute; left: calc(100% / 12); right: calc(100% / 12); top: 13px; height: 6px; border-radius: 3px;
+    background: var(--route-track);
+  }
+  .route::after {
+    content: ""; position: absolute; left: calc(100% / 12); top: 13px; height: 6px; border-radius: 3px;
+    width: calc(100% - 100% / 6); background: var(--route);
+    transform-origin: left center; animation: draw 2.4s cubic-bezier(.6, .05, .3, 1) .2s both;
+  }
+  @keyframes draw { from { transform: scaleX(0.02); } to { transform: scaleX(1); } }
+  @media (prefers-reduced-motion: reduce) { .route::after { animation: none; } }
+  .stop { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; padding-inline: 6px; }
+  .stop .pin {
+    width: 32px; height: 32px; border-radius: 50%; background: var(--surface); border: 5px solid var(--route);
+    position: relative; z-index: 1;
+  }
+  .stop:first-child .pin, .stop:last-child .pin { background: var(--route); box-shadow: inset 0 0 0 5px var(--surface); }
+  .stop .layer { margin-top: 14px; font-family: var(--font-display); font-weight: 800; font-size: 16px; letter-spacing: -0.01em; }
+  .stop .ident { margin-top: 4px; font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); overflow-wrap: normal; word-break: normal; }
+  .stop .idx { margin-top: 12px; font-family: var(--font-mono); font-size: 11.5px; color: var(--accent-ink); background: var(--accent-soft); padding: 2px 8px; border-radius: 999px; }
+  @media (max-width: 820px) {
+    .route { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+    .route::before, .route::after { left: 13px; right: auto; top: 16px; bottom: 16px; width: 6px; height: auto; }
+    .route::after { transform-origin: center top; animation-name: drawv; }
+    @keyframes drawv { from { transform: scaleY(0.02); } to { transform: scaleY(1); } }
+    .stop { flex-direction: row; align-items: center; text-align: left; gap: 0 14px; flex-wrap: wrap; padding-inline: 0; }
+    .stop .pin { flex: none; }
+    .stop .layer { margin-top: 0; }
+    .stop .ident { margin-top: 0; flex-basis: 100%; padding-left: 46px; }
+    .stop .idx { margin-top: 6px; margin-left: 46px; }
+  }
+  .measure { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; margin-top: 30px; border-top: 1px solid var(--line); }
+  .measure.m4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .measure.m4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .measure { grid-template-columns: minmax(0, 1fr); } }
+  .measure div { padding: 18px 16px 4px 0; }
+  .measure b { display: block; font-family: var(--font-display); font-weight: 800; font-size: 30px; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+  .measure span { font-size: 13.5px; color: var(--muted); }
+  .note { margin-top: 14px; font-size: 13px; color: var(--muted); }
+
+  /* ─── 실제 실행 녹화 ─── */
+  .demo { max-width: 780px; margin: 0 auto; }
+  .demo img { display: block; width: 100%; height: auto; }
+  .demo-note { max-width: 780px; margin-inline: auto; }
+  .demo-note a { color: var(--accent-ink); }
+  .demo-tabs { max-width: 780px; margin-inline: auto; }
+
+  /* ─── 두 칸 (설명 + 터미널) ─── */
+  .split { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: clamp(28px, 5vw, 64px); align-items: start; }
+  @media (max-width: 980px) { .split { grid-template-columns: minmax(0, 1fr); } }
+  .points { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 22px; }
+  .points li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 12px; }
+  .points .mk { width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); position: relative; top: 3px; }
+  .points .mk::after { content: ""; position: absolute; inset: 7px; border-radius: 2px; background: var(--accent); }
+  .points .mk.warn { background: var(--warn-soft); }
+  .points .mk.warn::after { background: var(--warn); }
+  .points h3 { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.45; }
+  .points p { margin-top: 4px; color: var(--ink-soft); font-size: 15.5px; }
+
+  /* ─── 작업 흐름 ─── */
+  .flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; counter-reset: step; }
+  @media (max-width: 1020px) { .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .flow { grid-template-columns: minmax(0, 1fr); } }
+  .flow li { counter-increment: step; display: flex; flex-direction: column; gap: 10px; padding: 20px 18px 22px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); }
+  .flow li::before { content: counter(step); font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--accent-ink); width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid var(--accent); display: grid; place-items: center; }
+  .flow .cmd { font-family: var(--font-mono); font-size: 13.5px; font-weight: 700; color: var(--ink); }
+  .flow h3 { font-size: 17px; font-weight: 700; }
+  .flow p { font-size: 14.5px; color: var(--ink-soft); line-height: 1.65; }
+  .flow .ai { margin-top: auto; font-size: 12px; font-family: var(--font-mono); color: var(--muted); }
+  .flow .ai.none { color: var(--accent-ink); }
+
+  /* ─── 스킬 ─── */
+  .skills { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px 40px; }
+  @media (max-width: 980px) { .skills { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 620px) { .skills { grid-template-columns: minmax(0, 1fr); gap: 32px; } }
+  .group { border-top: 2px solid var(--ink); padding-top: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .group h3 { font-size: 19px; font-weight: 800; letter-spacing: -0.015em; }
+  .group dl { margin: 0; display: flex; flex-direction: column; gap: 14px; }
+  .group dl > div { display: flex; flex-direction: column; gap: 4px; }
+  .group dt code { background: var(--accent-soft); color: var(--accent-ink); font-weight: 700; font-size: 13px; white-space: nowrap; }
+  .group dd { margin: 0; font-size: 14.8px; line-height: 1.65; color: var(--ink-soft); }
+  .group .eg { font-size: 13.5px; color: var(--muted); border-left: 2px solid var(--line-strong); padding-left: 10px; }
+  .skills-foot { margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 14.5px; color: var(--muted); line-height: 1.9; }
+  .skills-foot code { font-size: 12.5px; }
+
+  /* ─── 지원 스택 ─── */
+  .stacks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 48px; }
+  @media (max-width: 820px) { .stacks { grid-template-columns: minmax(0, 1fr); } }
+  .stack { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .stack .n { font-weight: 500; }
+  .stack .d { font-size: 13px; color: var(--muted); margin-top: 2px; display: block; }
+  .lvl { flex: none; font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; letter-spacing: 0.05em; padding: 3px 9px; border-radius: 999px; }
+  .lvl.full { background: var(--accent-soft); color: var(--accent-ink); }
+  .lvl.part { background: var(--warn-soft); color: var(--warn); }
+
+  /* ─── 설치 ─── */
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+  .tab {
+    appearance: none; background: none; border: 0; cursor: pointer;
+    font: 600 15px/1 var(--font-body); color: var(--muted);
+    padding: 12px 14px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--ink); }
+  .panel { display: grid; gap: 18px; max-width: 880px; }
+  .panel p { color: var(--ink-soft); }
+  .cmdbox { position: relative; background: var(--term-bg); color: var(--term-ink); border-radius: 10px; border: 1px solid var(--term-line); }
+  .cmdbox pre { margin: 0; padding: 16px 92px 16px 18px; overflow-x: auto; font: 13.5px/1.7 var(--font-mono); white-space: pre; }
+  .cmdbox .lbl { display: block; padding: 10px 18px 0; font: 11.5px var(--font-mono); color: var(--term-dim); letter-spacing: 0.04em; }
+  .copy {
+    position: absolute; right: 10px; top: 10px;
+    font: 600 12.5px/1 var(--font-body); color: var(--term-ink);
+    background: #1E2C34; border: 1px solid #2F414B; border-radius: 7px; padding: 8px 11px; cursor: pointer;
+  }
+  .copy:hover { background: #26363F; }
+  .copy[data-done] { color: var(--term-green); }
+  .hint { font-size: 14px; color: var(--muted); }
+  .hint code { font-size: 12.5px; }
+
+  /* ─── 맺음 ─── */
+  .closing { padding-block: clamp(64px, 9vw, 112px); border-top: 1px solid var(--line); text-align: left; }
+  .closing h2 { font-size: clamp(30px, 4.4vw, 52px); letter-spacing: -0.035em; line-height: 1.18; font-weight: 800; max-width: 16em; }
+  .closing h2 em { font-style: normal; color: var(--accent); }
+  footer { border-top: 1px solid var(--line); padding-block: 28px 40px; font-size: 13.5px; color: var(--muted); }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
+  footer nav { display: flex; flex-wrap: wrap; gap: 18px; margin-left: auto; }
+  footer a { color: var(--ink-soft); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="AX Navi 처음으로">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="5" width="26" height="18" rx="5" fill="none" stroke="var(--ink)" stroke-width="2.2"/>
+        <circle cx="11" cy="14" r="2.6" fill="var(--accent)"/>
+        <circle cx="21" cy="14" r="2.6" fill="var(--accent)"/>
+        <path d="M11 14 H21" stroke="var(--accent)" stroke-width="1.6"/>
+        <path d="M11 23 V27 M21 23 V27 M6 28 H26" stroke="var(--ink)" stroke-width="2.2" stroke-linecap="round"/>
+      </svg>
+      <span class="brand-name">AX NAVI</span>
+      <span class="brand-ver">plugin v0.3.10</span>
+    </a>
+    <nav class="nav" aria-label="주요 메뉴">
+      <a href="#map">코드 지도</a>
+      <a href="#db">DB 덤프</a>
+      <a href="#depth">분석 깊이</a>
+      <a href="#safety">안전장치</a>
+      <a href="#skills">스킬</a>
+      <a href="#install">설치</a>
+      <a href="site/">문서</a>
+      <a class="gh" href="https://github.com/Malburi/AX-NAVI-V2">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="wrap">
+      <div>
+        <span class="eyebrow"><span class="dot"></span>ITO/SI/SM 레거시를 위한 Claude Code 플러그인</span>
+        <h1>처음 보는 레거시도,<br><em>지도부터</em> 그리고<br><span class="soft">고칩니다.</span></h1>
+        <p class="lede">AX Navi 는 코드베이스 전체를 먼저 색인해 화면·서비스·SQL·테이블이 어떻게 이어지는지 지도로 만듭니다. 그 지도 위에서 찾고, 따라가고, 영향을 보고, 컨벤션에 맞춰 고칩니다. 업무 로직이 오라클 패키지에 있으면 DB 덤프까지 같은 지도에 잇습니다. Claude Code 안에서 말로 부탁하면 됩니다.</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="#install">설치하기</a>
+          <a class="btn btn-ghost" href="https://github.com/Malburi/AX-NAVI-V2">GitHub 에서 보기</a>
+        </div>
+        <ul class="facts" aria-label="구성">
+          <li><b>19</b><span>전문 에이전트</span></li>
+          <li><b>24</b><span>워크플로우 스킬</span></li>
+          <li><b>15</b><span>종의 코드 인덱스</span></li>
+          <li><b>0</b><span>npm 의존성</span></li>
+        </ul>
+      </div>
+
+      <figure class="term" aria-label="Claude Code 에서 기능 위치를 찾는 예시 화면" style="margin:0">
+        <div class="term-bar"><i></i><i></i><i></i><span class="title">claude — 예시 화면</span></div>
+<pre><span class="t-cy">  ╭─────────╮</span>
+<span class="t-cy">  │ ◉ ─── ◉ │</span>   <span class="t-b">AX NAVI</span> <span class="t-dim">plugin 0.3.10</span>
+<span class="t-cy">  ╰──┬───┬──╯</span>   <span class="t-dim">인덱스  최신 · 소스 지문 일치</span>
+
+<span class="t-cy">❯</span> <span class="t-b">/ax-navi:find 결제 승인 기능 찾아줘</span>
+<span class="t-cy">●</span> QueryIndex(search <span class="t-dim">"승인"</span>)  <span class="t-dim">41건</span>
+<span class="t-cy">●</span> QueryIndex(callers ApproveService.approve)  <span class="t-dim">3건</span>
+<span class="t-cy">●</span> Read(ApproveService.java:88-142)
+
+<span class="t-gr">찾은 것</span>
+  approve.jsp → <span class="t-b">ApproveAction.execute</span>
+    → ApproveService.approve <span class="t-dim">(트랜잭션 경계)</span>
+    → ApproveDao.update → SQL <span class="t-ye">APPROVE_U01</span> → TB_APPROVE
+<span class="t-rd">확인했는데 없는 것</span>
+  승인 취소 SQL <span class="t-dim">0건 · schema 에 CANCEL_DT 컬럼 없음</span>
+<span class="t-ye">확인하지 못한 것</span>
+  외부 PG 응답 형식 <span class="t-dim">— 저장소 밖 라이브러리</span>
+
+<span class="t-cy">❯</span> <span class="caret"></span></pre>
+      </figure>
+    </div>
+  </section>
+
+  <section class="sec" id="day1">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">첫날 질문</div>
+        <div>
+          <h2>문서는 없고, 코드는 수천 개고,<br>질문은 매일 옵니다.</h2>
+          <p>인수인계 문서가 없는 레거시에서 첫 주에 제일 많이 받는 질문들입니다. 명령을 외울 필요는 없습니다. 말로 부탁하면 알맞은 스킬이 실행되고, 짧게 부르려면 별칭이 있습니다.</p>
+        </div>
+      </div>
+      <div class="asks">
+        <div class="ask">
+          <q>이 기능, 어디 구현돼 있어요?</q>
+          <span class="who">새로 투입된 개발자</span>
+          <span class="ans"><code>/ax-navi:find</code> 화면 · 서비스 · SQL 위치를 목록으로</span>
+        </div>
+        <div class="ask">
+          <q>저장 버튼 누르면 뭐가 실행돼요?</q>
+          <span class="who">담당자 인수인계</span>
+          <span class="ans"><code>/ax-navi:flow</code> 진입점부터 DB 까지 한 줄로</span>
+        </div>
+        <div class="ask">
+          <q>이 컬럼 빼도 안 터져요?</q>
+          <span class="who">운영 중인 시스템을 고칠 때</span>
+          <span class="ans"><code>/ax-navi:impact</code> 저장소를 넘어 화면까지 계산</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="map">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">코드 지도</div>
+        <div>
+          <h2>버튼 하나에서 테이블까지,<br>한 줄로 이어 둡니다.</h2>
+          <p>AX Navi 는 AI 를 부르기 전에 소스를 전수 파싱합니다. 심볼 · 호출 관계 · SQL 사용처 · 트랜잭션 경계 · DB 스키마를 인덱스로 남기고, 모든 답은 이 지도를 근거로 나옵니다. 추측으로 채운 경로는 없습니다.</p>
+        </div>
+      </div>
+
+      <div class="route-box">
+        <div class="route-cap"><span><b>처리 흐름 한 줄</b> — 역마다 그 연결을 잡아낸 인덱스</span><span class="mono">예시 · Struts 계열 Java</span></div>
+        <ol class="route">
+          <li class="stop"><span class="pin" aria-hidden="true"></span><span class="layer">화면</span><span class="ident">approve.<wbr>jsp</span><span class="idx">api_contract</span></li>
+          <li class="stop"><span class="pin" aria-hidden="true"></span><span class="layer">Action</span><span class="ident">ApproveAction.<wbr>execute</span><span class="idx">symbols</span></li>
+          <li class="stop"><span class="pin" aria-hidden="true"></span><span class="layer">Service</span><span class="ident">ApproveService.<wbr>approve</span><span class="idx">transactions</span></li>
+          <li class="stop"><span class="pin" aria-hidden="true"></span><span class="layer">DAO</span><span class="ident">ApproveDao.<wbr>update</span><span class="idx">call_graph</span></li>
+          <li class="stop"><span class="pin" aria-hidden="true"></span><span class="layer">SQL</span><span class="ident">APPROVE_U01</span><span class="idx">sql_usage</span></li>
+          <li class="stop"><span class="pin" aria-hidden="true"></span><span class="layer">테이블</span><span class="ident">TB_APPROVE</span><span class="idx">schema</span></li>
+        </ol>
+        <div class="measure">
+          <div><b>2,737</b><span>파일을 전수 색인</span></div>
+          <div><b>15종</b><span>인덱스 (호출 · SQL · 트랜잭션 · 스키마 …)</span></div>
+          <div><b>0회</b><span>색인 중 AI 호출</span></div>
+        </div>
+        <p class="note">실측 · 실제 Java/Struts LMS 저장소 한 곳. DDL 이 없으면 SQL 에서 스키마를 유도합니다. 문자열 디스패치(<code>TransData.do?worker=…&amp;action=…</code>)나 XML 로만 연결되는 호출은 인덱스가 못 푼 것(미해결)으로 따로 세어 두고, 호출처가 없다고 단정하지 않습니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="v2">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">v2 · 인덱스 2.0</div>
+        <div>
+          <h2>코드에 안 보이는 연결까지,<br>고치기 전에 찾아냅니다.</h2>
+          <p>레거시 화면은 서버를 <code>TransData.do?worker=…&amp;action=…</code> 처럼 문자열로 부르고, 결과를 <code>rtInfo[1][2]</code> 처럼 위치로 읽는 일이 흔합니다. 호출이 코드에 없으니 grep 으로도, 백엔드만 봐서도 보이지 않습니다. 인덱스는 이 연결을 설정 없이 찾아 백엔드 메서드 · SQL 컬럼 순서와 잇고, <code>impact</code> 한 번으로 다른 저장소 화면까지 "이 컬럼을 빼면 어디가 깨지는지"를 돌려줍니다.</p>
+        </div>
+      </div>
+      <div class="split">
+        <figure class="term" aria-label="쿼리 컬럼을 빼면 영향받는 화면을 인덱스로 계산한 예시" style="margin:0">
+          <div class="term-bar"><i></i><i></i><i></i><span class="title">/ax-navi:impact — 백엔드 + 화면 저장소 (예시)</span></div>
+<pre><span class="t-cy">❯</span> <span class="t-b">/ax-navi:impact CATEGORY_TREE_S01 첫 컬럼 PARENT_NO 를 빼면?</span>
+<span class="t-dim">  사전 영향도를 인덱스로 계산해 넣었습니다</span>
+
+<span class="t-gr">결론</span>
+  PARENT_NO 를 빼면 화면 <span class="t-b">24곳</span>이 깨집니다 <span class="t-dim">(저장소 2개)</span>
+  결과를 위치로 읽어 뒤 컬럼이 한 칸씩 밀립니다
+  SELECT [<span class="t-ye">0: PARENT_NO</span> | 1: PATH | 2: NO]
+
+<span class="t-rd">영향받는 곳 (전체 24)</span>
+  client/js/tree.js:842     onResult — rtInfo[1][2] <span class="t-dim">NO → undefined</span>
+  client/js/select.js:67    onResult — rtInfo[1][1] <span class="t-dim">PATH → NO</span>
+  server/jsp/check.jsp:249  onResult — rtInfo[1][2] <span class="t-dim">NO → undefined</span>
+  <span class="t-dim">… 21곳</span></pre>
+        </figure>
+        <div>
+          <ul class="points">
+            <li><span class="mk" aria-hidden="true"></span><div><h3>문자열 디스패치를 스스로 알아냅니다</h3><p>화면의 호출 모양에서 "이 파라미터가 빈 이름, 저 파라미터가 메서드"라는 규칙을 추론하고, 빈과 메서드가 실제로 있을 때만 잇습니다. 그래서 이런 메서드를 죽은 코드로 잘못 보지 않습니다.</p></div></li>
+            <li><span class="mk" aria-hidden="true"></span><div><h3>"안 쓰는 것 같으니 빼줘"에 멈춥니다</h3><p>요청의 전제가 인덱스 사실과 다르면 쓰는 곳 목록과 함께 선택지를 내고 멈춥니다. 고친 뒤에도 위치로 읽는 화면이 남아 있으면 훅이 Claude 가 이어서 처리하게 합니다.</p></div></li>
+            <li><span class="mk" aria-hidden="true"></span><div><h3>절차는 가볍게</h3><p>인덱스 신선도는 훅이 확인하고, 영향도는 인덱스로 먼저 계산해 넣습니다. 고친 뒤 LLM 재평가는 DDL · 트랜잭션 · 인증 · 데이터 변경 같은 위험한 변경에서만 한 번 돕니다.</p></div></li>
+          </ul>
+        </div>
+      </div>
+      <div class="route-box" style="margin-top:28px">
+        <div class="route-cap"><span><b>같은 과제 재측정</b> — 방식마다 3회 평균</span><span class="mono">평범한 Claude Code · v1 → v2</span></div>
+        <div class="measure m4">
+          <div><b>24/24</b><span>실제 사내 레거시 영향도 · 평범한 Claude Code 1/24</span></div>
+          <div><b>$0.12</b><span>같은 과제 v1 $0.74 · 4분 34초 → 62초</span></div>
+          <div><b>0/3</b><span>"컬럼 빼줘"에 화면을 깨뜨린 횟수 · v1 2/3</span></div>
+          <div><b>7분</b><span>백 · 프론트 동시 수정 · v1 23분 · $4.45 → $1.36</span></div>
+        </div>
+        <p class="note">실측 · AX-NAVI CLI 실행기로 잰 값입니다. 이 플러그인의 훅 경로로 다시 재지는 않았습니다. 한 저장소 안의 단순한 질문은 평범한 Claude Code 가 여전히 더 싸고 빠릅니다 — 값을 하는 곳은 다른 저장소 · 문자열 호출 · 위치로 읽는 결과처럼 코드만 봐서는 안 보이는 영향입니다. 측정 조건은 <a href="https://github.com/Malburi/AX-NAVI-CLI/blob/main/docs/changelog.md">AX-NAVI-CLI 변경 이력</a>에 있습니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="db">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">DB 덤프 · 0.3</div>
+        <div>
+          <h2>업무 로직이 오라클 패키지에 있어도,<br>지도가 끊기지 않습니다.</h2>
+          <p>수강신청 가능 여부 · 자동 수료 판정 같은 핵심 규칙이 <code>PR_APPLY_CHECK</code> 한 줄 호출 뒤에 숨어 있으면 소스 저장소만으로는 분석이 거기서 끊깁니다. DDL 과 프로시저 소스를 덤프로 프로젝트 안에 두고 <code>db_dump_paths</code> 로 알려 주면, 같은 인덱스에 이어 붙습니다.</p>
+        </div>
+      </div>
+      <div class="split">
+        <div>
+          <ul class="points">
+            <li><span class="mk" aria-hidden="true"></span><div><h3>Java 호출부터 프로시저 · 테이블까지</h3><p><code>{call PKG.PROC}</code> · <code>EXEC</code> · <code>CALL</code> 호출이 프로시저 정의로 이어지고, 그 프로시저가 읽고 쓰는 테이블 · 부르는 다른 프로시저가 한 질의로 나옵니다. 테이블을 바꾸면 영향받는 프로시저 · 트리거도 보입니다.</p></div></li>
+            <li><span class="mk" aria-hidden="true"></span><div><h3>Oracle · MSSQL · MySQL · PostgreSQL</h3><p>방언은 파일 내용으로 자동 판별합니다. <code>GO</code> 경계 · <code>DELIMITER</code> · <code>$$</code> 본문 · <code>/*!50003 */</code> 조건부 주석처럼 방언마다 다른 모양을 따로 처리합니다.</p></div></li>
+            <li><span class="mk warn" aria-hidden="true"></span><div><h3>없는 덤프도 알려 줍니다</h3><p>소스에는 호출이 있는데 덤프에 정의가 없는 프로시저를 호출처 수 순으로 모읍니다. 어떤 덤프를 더 받아야 하는지 그대로 보입니다. 데이터 행은 넣지 마세요 — 스키마와 소스면 충분합니다.</p></div></li>
+          </ul>
+        </div>
+        <figure class="term" aria-label="DB 덤프를 연결한 뒤 테이블을 건드리는 프로시저를 찾는 예시" style="margin:0">
+          <div class="term-bar"><i></i><i></i><i></i><span class="title">db/dump 를 연결한 뒤 (예시)</span></div>
+<pre><span class="t-dim">  indexer-config.json</span>  { "db_dump_paths": ["db/dump"] }
+
+<span class="t-cy">❯</span> <span class="t-b">TB_APPLY 를 읽고 쓰는 DB 로직이 뭐야?</span>
+<span class="t-cy">●</span> QueryIndex(schema --table TB_APPLY)
+
+<span class="t-gr">이 테이블에 접근하는 DB 단위</span>
+  PKG_APPLY.CHECK_ELIGIBLE   <span class="t-dim">읽기</span>   TB_APPLY · TB_COURSE
+  PKG_APPLY.SAVE_APPLY       <span class="t-dim">쓰기</span>   TB_APPLY
+  TRG_APPLY_AUDIT            <span class="t-dim">쓰기</span>   TB_APPLY_LOG
+
+<span class="t-gr">호출처</span>
+  ApplyService.doApply → <span class="t-ye">{call PKG_APPLY.CHECK_ELIGIBLE}</span>
+
+<span class="t-ye">정의가 없는 프로시저</span> <span class="t-dim">— 덤프에 더 필요한 것</span>
+  PR_COMPL_PROC   <span class="t-dim">호출 12곳</span></pre>
+        </figure>
+      </div>
+      <div class="route-box" style="margin-top:28px">
+        <div class="route-cap"><span><b>방언별로 읽는 것</b></span><span class="mono">schema.json · procedures · triggers · views</span></div>
+        <div class="stacks">
+          <div class="stack"><span><span class="n">Oracle</span><span class="d">테이블(TABLESPACE · PARTITION) · 인덱스 · 뷰 · 시퀀스 · 시노님 · 패키지 SPEC/BODY · 프로시저 · 함수 · 트리거</span></span></div>
+          <div class="stack"><span><span class="n">MSSQL (T-SQL)</span><span class="d"><code>GO</code> 경계 · <code>[bracket]</code> 이름 · <code>EXEC</code> · 트리거의 inserted · deleted</span></span></div>
+          <div class="stack"><span><span class="n">MySQL · MariaDB</span><span class="d"><code>DELIMITER</code> · 조건부 주석 · 인라인 <code>KEY</code></span></span></div>
+          <div class="stack"><span><span class="n">PostgreSQL</span><span class="d"><code>$$</code> 본문 · <code>RETURNS TRIGGER</code> · <code>CREATE OR REPLACE</code></span></span></div>
+        </div>
+        <p class="note">한계 · 동적 SQL(<code>EXECUTE IMMEDIATE</code> 변수) · 오버로드 · 중첩 로컬 프로시저는 근사이고, 루틴 변경은 원문을 읽어 확인한 뒤 진행합니다(PARTIAL). 방언별 파서는 합성 샘플과 실제 프로젝트 하나(Oracle 호출 쪽)로 검증했고, 실제 DB 덤프로는 아직 충분히 시험하지 못했습니다. 덤프에는 스키마와 업무 로직이 들어 있으니 저장소에 커밋하지 마세요.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="depth">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">분석 깊이 게이트</div>
+        <div>
+          <h2>얕은 분석은 점수를 받기 전에<br>먼저 막습니다.</h2>
+          <p>LLM 이 인덱스 요약만 옮기고 <code>업무 규칙</code> · <code>업무별 흐름</code> 절을 "미수행"으로 비워도 평가가 통과하던 문제가 있었습니다(실측: 소스 2,737파일, 리포트 6KB, 84점). 평가 <b>전에</b> 결정론적으로(LLM 없이) 깊이를 재서, 얕으면 영역별 심층 분석을 처방합니다.</p>
+        </div>
+      </div>
+      <div class="split">
+        <div>
+          <ul class="points">
+            <li><span class="mk" aria-hidden="true"></span><div><h3>막는 신호는 규모와 무관한 둘뿐</h3><p>비어 있는 필수 절이 2개 이상이거나 <code>파일:줄</code> 근거가 하한의 25% 미만이면 FAIL 입니다. 서술 분량 · "미수행" 표현은 프로젝트 둘로 정한 경험값이라 WARN 만 냅니다.</p></div></li>
+            <li><span class="mk" aria-hidden="true"></span><div><h3>작은 프로젝트도 똑같이, 처방은 작게</h3><p>영역 수는 파일 400개당 1개(1~7), 영역당 약 25만 토큰입니다. 견적이 30만 토큰 이하(영역 1개)면 묻지 않고 진행하고, 그 이상이면 확인을 받습니다. 작은 프로젝트라고 분석을 덜 하지는 않습니다.</p></div></li>
+            <li><span class="mk warn" aria-hidden="true"></span><div><h3>거절해도 숨기지 않습니다</h3><p>사용자가 심층 분석을 거절하면 <code>declined</code> 로 기록하고 평가는 -5점만 매깁니다. 같은 일을 다시 시키지 않지만, 보고에는 "분석 깊이 미달"이 그대로 남습니다. 임계값은 <code>depth_gate</code> 설정으로 조정하거나 끕니다.</p></div></li>
+          </ul>
+        </div>
+        <div class="route-box">
+          <div class="route-cap"><span><b>실제 적용</b> — Java/Struts LMS 서버</span><span class="mono">심층 분석 전 → 후</span></div>
+          <div class="measure m4" style="margin-top:0;border-top:0">
+            <div><b>3.6→316KB</b><span>분석 서술 분량</span></div>
+            <div><b>0→898건</b><span><code>파일:줄</code> 근거</span></div>
+            <div><b>84→96</b><span>하네스 평가 점수</span></div>
+            <div><b>FAIL→PASS</b><span>깊이 게이트</span></div>
+          </div>
+          <p class="note">실측 · 영역 7개를 병렬로 읽은 심층 분석(소스 2,737파일, 약 190만 토큰). 하한은 프로젝트 둘의 실측이고, 심층 분석은 AI 가 쓴 것이라 표본 검증만 했습니다. 작은 프로젝트의 동작은 합성 리포트로만 확인했습니다.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="honest">
+    <div class="wrap">
+      <div class="split">
+        <div>
+          <div class="sec-head" style="grid-template-columns:minmax(0,1fr);margin-bottom:28px">
+            <div class="kicker">정직한 보고</div>
+            <div>
+              <h2>"없다"는 것도<br>답의 절반입니다.</h2>
+            </div>
+          </div>
+          <ul class="points">
+            <li><span class="mk" aria-hidden="true"></span><div><h3>찾은 것 · 확인했는데 없는 것 · 확인하지 못한 것</h3><p>셋을 나눠 보고합니다. "관련 컬럼 없음 · SQL 0건" 같은 사실이 판단에 바로 쓰입니다.</p></div></li>
+            <li><span class="mk" aria-hidden="true"></span><div><h3>백엔드와 프론트엔드를 함께</h3><p><code>pair-init</code> 으로 짝 저장소를 연결해 두면 다른 저장소에 미치는 영향을 인덱스가 한 번에 따라갑니다. 백엔드 1개 + 클라이언트 여러 개(웹 · 모바일 · 관리자)도 됩니다.</p></div></li>
+            <li><span class="mk warn" aria-hidden="true"></span><div><h3>인덱스가 못 푼 것은 못 풀었다고 말합니다</h3><p>문자열 디스패치 · XML 배선처럼 정적으로 확정하지 못한 호출은 미해결로 세어 두고, 호출처가 없다고 단정하지 않습니다.</p></div></li>
+          </ul>
+        </div>
+        <figure class="term" aria-label="두 저장소를 한 세션에서 탐색하는 예시 화면" style="margin:0">
+          <div class="term-bar"><i></i><i></i><i></i><span class="title">my-project — 저장소 2개 (예시)</span></div>
+<pre><span class="t-dim">  인덱스  저장소 2개 — my-client(1,428) · my-server(2,575)</span>
+
+<span class="t-cy">❯</span> <span class="t-b">/ax-navi:find 영상 자막 기능 찾아줘</span>
+<span class="t-cy">●</span> QueryIndex(search <span class="t-dim">"자막"</span>, root=my-client)  <span class="t-dim">기능 후보 3곳</span>
+<span class="t-cy">●</span> QueryIndex(search <span class="t-dim">"자막"</span>, root=my-server)  <span class="t-dim">기능 후보 2곳</span>
+<span class="t-cy">●</span> Read(VideoPlayer.js:400-460)
+
+<span class="t-gr">찾은 것</span>
+  VideoPlayer.js:420  자막 메뉴 (CaptionMenu)
+  LectureService.java:210 → SQL LECTURE_S01
+<span class="t-rd">확인했는데 없는 것</span>
+  자막 관련 심볼 19개 키워드 · 테이블 8개 · API 6개 <span class="t-dim">모두 0건</span>
+<span class="t-ye">확인하지 못한 것</span>
+  배포 전용 스크립트 player-ext.js <span class="t-dim">— 저장소 밖</span></pre>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="safety">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">안전장치</div>
+        <div>
+          <h2>고치는 동안에도,<br>훅이 곁에서 지켜봅니다.</h2>
+          <p>플러그인이 켜져 있으면 Claude Code 의 훅이 인덱스 신선도 · 사전 영향도 · 인코딩 보존 · 고친 뒤 확인을 맡습니다. 지침에만 적어 둔 규칙이 아니라 실제로 실행되는 코드입니다.</p>
+        </div>
+      </div>
+      <ol class="flow">
+        <li><span class="cmd">세션 시작</span><h3>인덱스 신선도 확인</h3><p>인덱스가 있으면 소스 지문을 비교하고, 바뀐 저장소만 다시 만듭니다.</p><span class="ai none">AI 0원</span></li>
+        <li><span class="cmd">질문 입력</span><h3>사전 영향도</h3><p>영향도 · 수정 요청이면 인덱스로 계산한 영향 범위를 맥락으로 먼저 넣습니다.</p><span class="ai none">AI 0원</span></li>
+        <li><span class="cmd">셸 명령 전</span><h3>무리한 명령 차단</h3><p>디스크 전체 검색(<code>find /</code>)을 막고, 평가 서브에이전트는 요청당 1번으로 제한합니다. 셸로 소스를 쓰는 명령의 승인은 <code>AXNAVI_SHELL_WRITE_GUARD=1</code> 로 켭니다(기본 꺼짐).</p><span class="ai none">AI 0원</span></li>
+        <li><span class="cmd">읽기 · 쓰기</span><h3>레거시 인코딩 보존</h3><p>EUC-KR 같은 파일을 읽고 쓸 때 인코딩을 지킵니다.</p><span class="ai none">AI 0원</span></li>
+        <li><span class="cmd">답이 끝날 때</span><h3>고친 뒤 확인</h3><p>UTF-8 로 바뀐 EUC-KR 파일을 되돌려 쓰고, SELECT 순서를 바꿨는데 위치로 읽는 화면이 남았으면 Claude 가 이어서 처리하게 합니다.</p><span class="ai none">AI 0원</span></li>
+      </ol>
+      <p class="note" style="margin-top:16px">Edit · Write 승인은 Claude Code 의 권한 모드를 그대로 따릅니다. 훅 설정은 <code>hooks/hooks.json</code>, 판정 코드는 <code>packages/plugin/src/hooks.mjs</code> 에 있습니다.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="flow">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">작업 흐름</div>
+        <div>
+          <h2>지도를 한 번 그리면,<br>그다음은 말로 부탁하면 됩니다.</h2>
+          <p>초기화는 프로젝트마다 한 번이고, 만들어진 <code>CLAUDE.md</code> · <code>.claude/</code> 를 커밋해 두면 팀원은 다시 하지 않습니다. 팀원은 인덱스만 수십 초에 다시 만듭니다.</p>
+        </div>
+      </div>
+      <ol class="flow">
+        <li><span class="cmd">하네스 초기화 해줘</span><h3>인덱싱</h3><p>소스 · 호출 · SQL · 스키마를 전수 파싱해 지도를 만듭니다. 규모와 견적이 이때 나옵니다.</p><span class="ai none">AI 0원 · 수십 초</span></li>
+        <li><span class="cmd">Full / Standard</span><h3>견적 보고 고르기</h3><p>예상 토큰을 보고 심층(Full)이나 일상 유지보수(Standard ≈ 60%)를 고릅니다. 여기서 멈춰도 인덱스는 남습니다.</p><span class="ai">LLM 시작 전</span></li>
+        <li><span class="cmd">분석 → 게이트</span><h3>분석 · 깊이 검사</h3><p>분석 리포트와 컨벤션 패턴을 만들고, 얕으면 영역별 심층 분석을 합니다. 점수로 검증하고 미달이면 보완합니다.</p><span class="ai">sonnet</span></li>
+        <li><span class="cmd">/ax-navi:find · flow · impact</span><h3>찾고 · 따라가고 · 영향 보기</h3><p>모든 답이 지도를 근거로 나옵니다. 인덱스를 통째로 읽지 않고 질의 스크립트로 좁힙니다.</p><span class="ai none">질의 AI 0원</span></li>
+        <li><span class="cmd">/ax-navi:modify</span><h3>컨벤션 따라 고치기</h3><p>영향도 → 변경 → 패턴 · 검증 순입니다. 고친 뒤 인덱스를 증분 갱신해 다음 작업이 최신을 봅니다.</p><span class="ai">위험한 변경만 평가</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="sec" id="skills">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">스킬</div>
+        <div>
+          <h2>유지보수의 거의 모든 일에,<br>맞는 스킬이 있습니다.</h2>
+          <p>찾고 고치는 일뿐 아니라 새 화면을 만들고, 스택을 옮기고, SQL 을 점검하는 일까지. 모두 같은 지도와 같은 컨벤션 위에서 돕니다.</p>
+        </div>
+      </div>
+      <div class="skills">
+        <div class="group">
+          <h3>찾고 이해하기</h3>
+          <dl>
+            <div><dt><code>/ax-navi:find</code></dt><dd>기능 · 키워드로 파일 · 클래스 · SQL 위치를 찾습니다.</dd></div>
+            <div><dt><code>/ax-navi:flow</code></dt><dd>기능 · API · 화면의 처리 흐름을 진입점부터 DB 까지 따라갑니다.</dd></div>
+            <div><dt><code>legacy-decoder</code></dt><dd>주석 없는 레거시 코드의 의도와 동작을 사람이 읽는 말로 풀어 줍니다.</dd></div>
+            <div><dt><code>/ax-navi:wiki</code></dt><dd>분석 결과를 인수인계용 위키로 만듭니다. 호출 그래프도 그림으로 남습니다.</dd></div>
+          </dl>
+        </div>
+        <div class="group">
+          <h3>고치기</h3>
+          <dl>
+            <div><dt><code>/ax-navi:impact</code></dt><dd>파일 · 함수 · SQL · 컬럼 · API 를 바꾸면 어디에 닿는지와 위험도를 봅니다.</dd></div>
+            <div><dt><code>/ax-navi:modify</code></dt><dd>영향도 확인 → 변경 → 패턴 · 실행 · 안전성 검증 순으로 고칩니다.</dd></div>
+            <div><dt><code>vibe</code></dt><dd>게이트는 건너뛰되 프로젝트 패턴과 최소 검증은 지키는 빠른 작업입니다.</dd></div>
+          </dl>
+        </div>
+        <div class="group">
+          <h3>새로 만들기</h3>
+          <dl>
+            <div><dt><code>/ax-navi:scaffold</code></dt><dd>이 프로젝트의 컨벤션 그대로 새 기능을 만듭니다. Controller · Service · DAO · DTO · 테스트까지.</dd></div>
+            <div><dt><code>cross-repo-scaffold</code></dt><dd>백엔드와 프론트엔드(웹 · 모바일 · 관리자까지) 전체 스택 기능을 한 번에 만듭니다.</dd></div>
+          </dl>
+        </div>
+        <div class="group">
+          <h3>옮기기</h3>
+          <dl>
+            <div><dt><code>plan-migration</code></dt><dd>스택 마이그레이션 계획을 세웁니다. 인벤토리 · 매핑 표 · 단계별 계획 · 위험 등록 · 테스트 전략 · 롤백 · 체크포인트.</dd></div>
+          </dl>
+          <p class="eg">예: Struts 1 → Spring MVC, iBatis → MyBatis</p>
+        </div>
+        <div class="group">
+          <h3>SQL</h3>
+          <dl>
+            <div><dt><code>/ax-navi:sql</code></dt><dd>SQL 문 · SQL ID · DDL · 변경분을 받아 사용처 · 인덱스 활용 · N+1 · 인젝션 · 트랜잭션 · 락 · 대량 처리 · 스키마 영향을 리뷰합니다.</dd></div>
+          </dl>
+          <p class="eg">DB 덤프가 있으면 프로시저 · 트리거 영향까지 봅니다.</p>
+        </div>
+        <div class="group">
+          <h3>백엔드와 프론트엔드를 함께</h3>
+          <dl>
+            <div><dt><code>pair-init</code></dt><dd>따로 있는 백엔드 · 프론트엔드 저장소를 연결하고, API 가 어긋난 곳을 찾습니다.</dd></div>
+            <div><dt><code>cross-repo-modify</code></dt><dd>한쪽에서 시킨 수정을 관련된 저장소에 함께 반영합니다.</dd></div>
+            <div><dt><code>api-bridge</code></dt><dd>API 계약을 뽑아 검증하고, 프론트엔드 서비스 스텁을 만듭니다.</dd></div>
+          </dl>
+        </div>
+      </div>
+      <p class="skills-foot">그 밖에 <code>spec-gate</code>(착수 전 명세 명확화) · <code>publish-wiki</code> · <code>wiki-hub</code>(여러 시스템 위키 통합 열람) · <code>harness-clean</code>(하네스 제거) 이 있고, 에이전트는 <code>analyzer</code> · <code>writer</code> · <code>pattern-extractor</code> · <code>validator</code> · <code>harness-evaluator</code> · <code>change-safety</code> · <code>test-generator</code> 등 19종입니다.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="stacks">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">지원 스택</div>
+        <div>
+          <h2>SI/SM 현장에 실제로 남아 있는 스택.</h2>
+          <p>FULL 은 심볼 · 호출 · SQL · 트랜잭션까지 결정적으로 뽑는 스택이고, PARTIAL 은 에이전트가 원문을 직접 읽어 확인한 뒤 수정하는 스택입니다. 읽을 수 없는 형식만 수정을 보류합니다.</p>
+        </div>
+      </div>
+      <div class="stacks">
+        <div class="stack"><span><span class="n">Java · Spring · Struts · MyBatis</span><span class="d">심볼 · 호출 그래프 · SQL · 트랜잭션 · 스키마</span></span><span class="lvl full">FULL</span></div>
+        <div class="stack"><span><span class="n">JavaScript · TypeScript · Vue · React</span><span class="d">일부 동적 패턴은 PARTIAL</span></span><span class="lvl full">FULL</span></div>
+        <div class="stack"><span><span class="n">Python · Go · C# / .NET</span></span><span class="lvl full">FULL</span></div>
+        <div class="stack"><span><span class="n">SQL / DDL (Oracle · MSSQL · MySQL · PostgreSQL)</span><span class="d">테이블 · 인덱스 · 뷰 · 시퀀스 · 시노님</span></span><span class="lvl full">FULL</span></div>
+        <div class="stack"><span><span class="n">ASP.NET Core · Nexacro (XJS)</span><span class="d">전용 어댑터로 보강</span></span><span class="lvl full">FULL</span></div>
+        <div class="stack"><span><span class="n">JSP · Struts XML · XFDL · WinForms Designer · DevExpress</span></span><span class="lvl part">PARTIAL</span></div>
+        <div class="stack"><span><span class="n">PL/SQL · T-SQL · MySQL · PL/pgSQL 루틴</span><span class="d">패키지 · 프로시저 · 함수 · 트리거, 호출 · 정적 SQL · Java <code>{call}</code> 연결</span></span><span class="lvl part">PARTIAL</span></div>
+        <div class="stack"><span><span class="n">Oracle Pro*C 배치 (.pc)</span><span class="d">C 함수 · EXEC SQL · PL/SQL 프로시저 연결</span></span><span class="lvl part">PARTIAL</span></div>
+        <div class="stack"><span><span class="n">PowerBuilder 텍스트 내보내기</span><span class="d">이벤트 · 함수 · 임베디드 SQL · DataWindow 연결</span></span><span class="lvl part">PARTIAL</span></div>
+      </div>
+      <p class="note" style="margin-top:18px">스택별 탐지 시그니처와 마이그레이션 시나리오는 <a href="site/#/reference/stack-matrix.md">지원 스택 매트릭스</a>에 있습니다.</p>
+    </div>
+  </section>
+
+  <section class="sec" id="install">
+    <div class="wrap">
+      <div class="sec-head">
+        <div class="kicker">설치</div>
+        <div>
+          <h2>Claude Code 와 Node.js 면 충분합니다.</h2>
+          <p>Node.js 18 이상이 필요하고 npm 의존성은 0 입니다. Python 3 은 하네스 조립 · 위키 생성 보조에만 씁니다. Claude Code 는 <code>claude plugin</code> 을 지원하는 최신 버전이어야 합니다.</p>
+        </div>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="설치 방법">
+        <button class="tab" role="tab" id="tab-new" aria-controls="panel-new" aria-selected="true">처음 설치</button>
+        <button class="tab" role="tab" id="tab-old" aria-controls="panel-old" aria-selected="false" tabindex="-1">이전 주소에서 옮기기</button>
+        <button class="tab" role="tab" id="tab-up" aria-controls="panel-up" aria-selected="false" tabindex="-1">업그레이드</button>
+      </div>
+
+      <div class="panel" role="tabpanel" id="panel-new" aria-labelledby="tab-new">
+        <div class="cmdbox"><span class="lbl">설치 (터미널)</span><pre>claude plugin marketplace add Malburi/AX-NAVI-V2
+claude plugin install ax-navi@ax-navi --scope user</pre><button class="copy" type="button" id="copy-new">복사</button></div>
+        <div class="cmdbox"><span class="lbl">시작 (프로젝트 루트에서)</span><pre>cd 내-프로젝트
+claude
+# Claude Code 안에서:  하네스 초기화 해줘</pre><button class="copy" type="button" id="copy-start">복사</button></div>
+        <p class="hint">설치 뒤 새 세션을 시작하거나 <code>/reload-plugins</code> 를 실행하세요. Claude Code 대화창에서는 <code>/plugin marketplace add Malburi/AX-NAVI-V2</code> → <code>/plugin install ax-navi@ax-navi</code> 로도 됩니다.</p>
+      </div>
+
+      <div class="panel" role="tabpanel" id="panel-old" aria-labelledby="tab-old" hidden>
+        <p>이전 주소(<code>Malburi/AX-NAVI</code>)로 등록해 둔 경우에는 마켓플레이스를 다시 등록합니다.</p>
+        <div class="cmdbox"><span class="lbl">다시 등록</span><pre>claude plugin uninstall ax-navi@ax-navi --scope user
+claude plugin marketplace remove ax-navi
+claude plugin marketplace add Malburi/AX-NAVI-V2
+claude plugin install ax-navi@ax-navi --scope user</pre><button class="copy" type="button" id="copy-old">복사</button></div>
+      </div>
+
+      <div class="panel" role="tabpanel" id="panel-up" aria-labelledby="tab-up" hidden>
+        <div class="cmdbox"><span class="lbl">갱신</span><pre>claude plugin marketplace update ax-navi
+claude plugin update ax-navi@ax-navi</pre><button class="copy" type="button" id="copy-up">복사</button></div>
+        <p class="hint">적용은 새 세션에서 됩니다. 판마다의 변경은 <a href="https://github.com/Malburi/AX-NAVI-V2/blob/main/docs/changelog.md">변경 이력</a>에 있습니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="closing">
+    <div class="wrap">
+      <h2>낯선 코드베이스에서 헤매는 시간을,<br><em>고치는 시간</em>으로 돌려드립니다.</h2>
+      <div class="cta" style="margin-top:32px">
+        <a class="btn btn-primary" href="#install">지금 설치하기</a>
+        <a class="btn btn-ghost" href="site/">문서 읽기</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Malburi · MIT License</span>
+    <nav aria-label="바닥 메뉴">
+      <a href="site/">문서</a>
+      <a href="https://github.com/Malburi/AX-NAVI-V2/blob/main/docs/changelog.md">변경 이력</a>
+      <a href="https://github.com/Malburi/AX-NAVI-V2">GitHub</a>
+      <a href="https://malburi.github.io/AX-NAVI-CLI/">AX-NAVI CLI</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    // 탭 — 탭 목록(데모 · 설치 방법)마다 따로 돈다. 방향키로도 옮긴다
+    document.querySelectorAll('[role="tablist"]').forEach(function (list) {
+      var tabs = Array.prototype.slice.call(list.querySelectorAll('.tab'));
+      function select(tab, focus) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+          t.tabIndex = on ? 0 : -1;
+          document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+        });
+        if (focus) tab.focus();
+      }
+      tabs.forEach(function (tab, i) {
+        tab.addEventListener('click', function () { select(tab, false); });
+        tab.addEventListener('keydown', function (e) {
+          if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+          e.preventDefault();
+          var next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+          select(next, true);
+        });
+      });
+    });
+
+    // 명령 복사
+    document.querySelectorAll('.copy').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var text = btn.parentElement.querySelector('pre').textContent;
+        var done = function () {
+          btn.textContent = '복사했습니다';
+          btn.setAttribute('data-done', '');
+          setTimeout(function () { btn.textContent = '복사'; btn.removeAttribute('data-done'); }, 1800);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { btn.textContent = '직접 선택해 복사하세요'; });
+        } else {
+          btn.textContent = '직접 선택해 복사하세요';
+        }
+      });
+    });
+  })();
+</script>
+</body>
+</html>
