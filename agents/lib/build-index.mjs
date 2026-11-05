@@ -39,7 +39,7 @@ import { extractNexacro } from "./adapters/nexacro.mjs";
 import { extractDispatchCalls, extractResultKeys, inferDispatchRules, resolveCall, selectColumns } from "./index/dispatch.mjs";
 import { detectSqlDialect, unwrapMysqlConditionalComments } from "./index/sql_dialect.mjs";
 
-export const INDEXER_VERSION = "2.0.0"; // 문자열 디스패치(worker·action → 빈 메서드)와 결과를 위치로 읽는 화면을 잇고, SELECT 컬럼 순서를 남긴다.
+export const INDEXER_VERSION = "2.1.0"; // 2.0.0: 문자열 디스패치(worker·action → 빈 메서드)와 결과를 위치로 읽는 화면을 잇고, SELECT 컬럼 순서를 남긴다. 2.1.0: DB 덤프(DDL·프로시저·트리거)를 schema.json 에 담고 Oracle·MSSQL·MySQL·PostgreSQL 방언을 구분한다 — 기존 인덱스는 stale 로 판정되어 재생성된다.
 
 /* AI edge patch에서 허용하는 관계 종류. analyzer는 노드를 새로 만들 수 없고 기존 노드 사이의 관계만 보강한다. */
 const AI_PATCH_EDGE_TYPES = new Set(["call", "inject", "inherit", "reflect", "dispatch"]);
