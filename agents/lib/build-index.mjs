@@ -3586,6 +3586,130 @@ function buildPlsqlSchemaObjects({ symbols, sqls, usages, edges }) {
   };
 }
 
+/*
+ * DB 사전 — 플러그인 DB 도구(db_export)가 덤프 폴더에 남기는 _catalog.json. 소스를 정규식으로 다시 읽은 근사가 아니라
+ * DB 가 이미 아는 사실이다: 객체 상태(INVALID)·암호화(wrapped), 컴파일러가 기록한 의존(ALL_DEPENDENCIES),
+ * 트리거, 배치 잡(어떤 프로시저를 언제 돌리나 — 소스만으로는 안 보이는 진입점), 테이블·컬럼 코멘트(한글 업무명).
+ * db_dump_paths 안에 있을 때만 읽는다. 없으면 인덱스는 예전과 같다.
+ */
+export function loadDbCatalog(root, config) {
+  const merged = { files: [], objects: [], dependencies: [], triggers: [], jobs: [], table_comments: [], column_comments: [] };
+  for (const scope of config?.db_dump_paths || []) {
+    const rel = slash(join(scope, "_catalog.json"));
+    const data = readJson(join(root, rel), null);
+    if (!data || data.version !== 1) continue;
+    merged.files.push(rel);
+    merged.objects.push(...(data.objects || []));
+    merged.dependencies.push(...(data.dependencies || []));
+    merged.triggers.push(...(data.triggers || []));
+    merged.jobs.push(...(data.jobs || []).map((job) => ({ ...job, file: rel })));
+    merged.table_comments.push(...(data.comments?.tables || []));
+    merged.column_comments.push(...(data.comments?.columns || []));
+  }
+  return merged.files.length ? merged : null;
+}
+
+/* 정의 없는 프로시저가 DB 에는 있지만 암호화(wrap)돼 소스를 받을 수 없는 경우 — 덤프를 다시 요청해도 소용없다는 표시. */
+function catalogWrapped(catalog, name) {
+  if (!catalog) return false;
+  const parts = String(name).toUpperCase().split(".");
+  return catalog.objects.some((item) => item.wrapped && parts.includes(String(item.name).toUpperCase()));
+}
+
+/* `OWNER.PKG.PROC`·`PKG.PROC`·`PROC` 를 인덱스 노드 id 후보로 — 긴 것부터(스키마 접두사는 id 에 없다). */
+function catalogTargetIds(target) {
+  const parts = String(target || "").toUpperCase().split(".").filter(Boolean);
+  return [...new Set([parts.slice(-2).join("."), parts.at(-1)].filter(Boolean))];
+}
+
+/* 배치 잡 → 그 잡이 부르는 프로시저. 기존 scheduler 진입점(@Scheduled)과 같은 바인딩으로 넣어 call_graph 에 이어진다. */
+function catalogJobBindings(catalog, workspace) {
+  if (!catalog) return [];
+  return catalog.jobs.flatMap((job) => (job.targets || []).map((target) => ({
+    trigger: `db-job#${job.owner}.${job.name}`, handler_name: catalogTargetIds(target).at(-1), handler_ids: catalogTargetIds(target),
+    type: "scheduler", file: job.file, line: 1, workspace, origin: "db-catalog",
+  })));
+}
+
+/*
+ * 사전의 사실을 schema.json 의 PL/SQL 객체·테이블 위에 얹는다. 정규식이 만든 tables_read/written 은 그대로 두고
+ * (사전은 읽기·쓰기를 구분하지 않는다), 컴파일러 기준 참조를 db_references 로 따로 단다. 둘의 차이
+ * (사전엔 있는데 소스 파싱이 못 본 테이블)는 동적 SQL·정규식 누락의 단서라 not_in_source_parse 로 드러낸다.
+ */
+function applyDbCatalog(catalog, plsqlObjects, schemaTables, jobEdges) {
+  if (!catalog) return null;
+  const up = (value) => String(value || "").toUpperCase();
+  const objects = new Map();
+  for (const item of catalog.objects) objects.set(`${up(item.name)}\u0000${up(item.type)}`, item);
+  const depsByName = new Map();
+  for (const dep of catalog.dependencies) {
+    if (!depsByName.has(up(dep.name))) depsByName.set(up(dep.name), []);
+    depsByName.get(up(dep.name)).push(dep);
+  }
+  const jobsByTarget = new Map();
+  for (const edge of jobEdges) {
+    if (!jobsByTarget.has(edge.to)) jobsByTarget.set(edge.to, []);
+    jobsByTarget.get(edge.to).push(edge.from.replace(/^trigger:db-job#/, ""));
+  }
+  const parsedByObject = new Map();
+  for (const unit of [...plsqlObjects.procedures, ...plsqlObjects.functions]) {
+    const key = up(unit.package || unit.name);
+    if (!parsedByObject.has(key)) parsedByObject.set(key, new Set());
+    for (const table of [...unit.tables_read, ...unit.tables_written]) parsedByObject.get(key).add(up(table).split(".").at(-1));
+  }
+  const TABLE_TYPES = new Set(["TABLE", "VIEW", "MATERIALIZED VIEW", "SYNONYM"]);
+  const referencesOf = (objectName, scope) => {
+    const deps = depsByName.get(objectName) || [];
+    if (!deps.length) return null;
+    const tables = [...new Set(deps.filter((dep) => TABLE_TYPES.has(up(dep.ref_type))).map((dep) => dep.ref_name))].sort(byCodeUnit);
+    const parsed = parsedByObject.get(objectName) || new Set();
+    return {
+      scope, tables,
+      objects: [...new Set(deps.filter((dep) => !TABLE_TYPES.has(up(dep.ref_type)) && up(dep.ref_name) !== objectName).map((dep) => `${dep.ref_name}:${dep.ref_type}`))].sort(byCodeUnit),
+      not_in_source_parse: tables.filter((table) => !parsed.has(up(table))),
+      origin: "db-catalog", confidence: "HIGH",
+    };
+  };
+  let invalid = 0;
+  let wrapped = 0;
+  for (const unit of [...plsqlObjects.procedures, ...plsqlObjects.functions]) {
+    const objectName = up(unit.package || unit.name);
+    const object = unit.package ? objects.get(`${objectName}\u0000PACKAGE BODY`) || objects.get(`${objectName}\u0000PACKAGE`) : objects.get(`${objectName}\u0000${up(unit.kind)}`);
+    if (object?.status && object.status !== "VALID") { unit.db_status = object.status; invalid += 1; }
+    if (object?.wrapped) { unit.wrapped = true; wrapped += 1; }
+    const references = referencesOf(objectName, unit.package ? "package" : "object");
+    if (references) unit.db_references = references;
+    if (jobsByTarget.has(unit.id)) unit.scheduled_by = jobsByTarget.get(unit.id).sort(byCodeUnit);
+  }
+  const triggerFacts = new Map(catalog.triggers.map((item) => [up(item.name), item]));
+  for (const trigger of plsqlObjects.triggers) {
+    const fact = triggerFacts.get(up(trigger.name));
+    if (!fact) continue;
+    if (fact.status && fact.status !== "ENABLED") trigger.db_status = fact.status;
+    if (!trigger.table && fact.table) trigger.table = fact.table;
+    if (!trigger.events?.length && fact.events?.length) trigger.events = fact.events;
+    const references = referencesOf(up(trigger.name), "object");
+    if (references) trigger.db_references = references;
+  }
+  const tableComments = new Map(catalog.table_comments.map((item) => [up(item.table), item.comment]));
+  const columnComments = new Map(catalog.column_comments.map((item) => [`${up(item.table)}\u0000${up(item.column)}`, item.comment]));
+  let commented = 0;
+  for (const table of schemaTables) {
+    const name = up(table.name).split(".").at(-1);
+    if (tableComments.has(name)) { table.comment = tableComments.get(name); commented += 1; }
+    for (const column of table.columns || []) {
+      const comment = columnComments.get(`${name}\u0000${up(column.name)}`);
+      if (comment) column.comment = comment;
+    }
+  }
+  return {
+    files: catalog.files, objects: catalog.objects.length, invalid_objects: catalog.objects.filter((item) => item.status && item.status !== "VALID").length,
+    wrapped_objects: catalog.objects.filter((item) => item.wrapped).length, dependencies: catalog.dependencies.length,
+    jobs: catalog.jobs.length, jobs_linked: new Set(jobEdges.map((edge) => edge.from)).size,
+    tables_commented: commented, units_invalid: invalid, units_wrapped: wrapped,
+  };
+}
+
 function deriveTablesFromSql(sqls) {
   const usage = new Map();
   for (const item of sqls) {
@@ -3608,7 +3732,7 @@ function deriveTablesFromSql(sqls) {
 
 function aggregate(facts, options, config, generatedAt, sourceFileCount, latestMtime, complexity, coverage, excludedSources = [], sourceFiles = []) {
   const symbols = unique(facts.flatMap((item) => item.symbols), (item) => item.id);
-  const bindings = facts.flatMap((item) => item.bindings || []);
+  const bindings = [...facts.flatMap((item) => item.bindings || []), ...catalogJobBindings(options.dbCatalog, config.workspaces?.[0]?.id || "root")];
   const nodes = unique([...facts.flatMap((item) => item.nodes), ...bindings.map((item) => ({ id: `trigger:${item.trigger}`, type: "trigger", file: item.file, line: item.line, workspace: item.workspace, origin: "deterministic-indexer", confidence: "HIGH" }))], (item) => item.id);
   const callSites = facts.flatMap((item) => item.callSites);
   /*
@@ -3848,6 +3972,8 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   for (const binding of bindings) {
     let candidates = preferConcrete((nodeBySimple.get(binding.handler_name) || []).filter((item) => item.type !== "trigger"));
     if (MARKUP_PAGE.test(binding.file || "")) candidates = pageCandidates(binding.file, binding.handler_name, candidates);
+    /* DB 배치 잡은 `PKG.PROC` 처럼 전체 이름을 안다 — 이름 끝만 같은 다른 메서드로 잇지 않는다. */
+    if (binding.handler_ids) candidates = binding.handler_ids.map((id) => candidates.filter((item) => item.id === id)).find((items) => items.length) || [];
     /*
      * 템플릿 이벤트 핸들러(@click 등)·markup 이벤트는 반드시 같은 파일의 스크립트 블록에
      * 정의된 메서드다 — qualifier 기반 호출(obj.method())과 달리 "다른 객체를 통한 동명
@@ -3866,7 +3992,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
       const sameFile = candidates.filter((item) => item.file === binding.file);
       if (sameFile.length === 1) candidates = sameFile;
     }
-    if (candidates.length === 1) edges.push({ from: `trigger:${binding.trigger}`, to: candidates[0].id, type: binding.type, file: binding.file, line: binding.line, workspace: binding.workspace, origin: "deterministic-indexer", confidence: "HIGH" });
+    if (candidates.length === 1) edges.push({ from: `trigger:${binding.trigger}`, to: candidates[0].id, type: binding.type, file: binding.file, line: binding.line, workspace: binding.workspace, origin: binding.origin || "deterministic-indexer", confidence: "HIGH" });
     else unresolved.push({ kind: "unresolved_trigger", trigger: binding.trigger, handler_name: binding.handler_name, candidates: candidates.map((item) => item.id), file: binding.file, line: binding.line, workspace: binding.workspace });
   }
   /** 본체 소스가 없는 저장 프로시저. 호출 엣지의 대상으로만 쓰인다. @type {Map<string, any>} */
@@ -4200,6 +4326,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   /* 중복 제거된 symbols가 아니라 원본을 넘긴다 — 같은 id의 패키지 스펙·바디가 하나로 합쳐지면 스펙 파일과 본문 유무를 알 수 없다. */
   const plsqlSymbols = facts.flatMap((item) => item.symbols).filter((item) => item.plsql_unit);
   const plsqlObjects = buildPlsqlSchemaObjects({ symbols: plsqlSymbols, sqls, usages, edges: uniqueEdges });
+  const catalogSummary = applyDbCatalog(options.dbCatalog, plsqlObjects, schemaTables, uniqueEdges.filter((edge) => edge.type === "scheduler" && String(edge.from).startsWith("trigger:db-job#")));
   const hasDbObjects = dbViews.length || dbSequences.length || dbSynonyms.length
     || plsqlObjects.procedures.length || plsqlObjects.functions.length || plsqlObjects.triggers.length;
   if (schemaTables.length || schemaRelations.length || hasDbObjects) output.schema = {
@@ -4221,7 +4348,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   for (const edge of uniqueEdges) calledBy.set(edge.to, (calledBy.get(edge.to) || 0) + 1);
   const undefinedProcedures = nodes
     .filter((node) => node.type === "db_procedure" && node.source === "external")
-    .map((node) => ({ name: String(node.id).replace(/^db:/, ""), callers: calledBy.get(node.id) || 0, first_call: node.file ? `${node.file}:${node.line ?? 1}` : null }))
+    .map((node) => ({ name: String(node.id).replace(/^db:/, ""), callers: calledBy.get(node.id) || 0, first_call: node.file ? `${node.file}:${node.line ?? 1}` : null, ...(catalogWrapped(options.dbCatalog, String(node.id).replace(/^db:/, "")) ? { wrapped: true } : {}) }))
     .sort((a, b) => b.callers - a.callers || byCodeUnit(a.name, b.name));
   /* 방언 분포. 하나뿐이면 schema._meta.dialect 로 올리고, 섞여 있으면 "mixed" 로 둔다(generic 은 판별 불가라 세지 않는다). */
   const dialectCounts = {};
@@ -4231,7 +4358,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   const concreteDialects = Object.keys(dialectCounts).filter((name) => name !== "generic");
   const dominantDialect = concreteDialects.length === 1 ? concreteDialects[0] : concreteDialects.length > 1 ? "mixed" : null;
   if (output.schema && dominantDialect) output.schema._meta.dialect = dominantDialect;
-  if (dbSourceFiles || hasDbObjects || undefinedProcedures.length) {
+  if (dbSourceFiles || hasDbObjects || undefinedProcedures.length || catalogSummary) {
     globalMeta.db_source = {
       dump_paths: config.db_dump_paths || [],
       source_files: dbSourceFiles,
@@ -4240,6 +4367,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
       packages: new Set(plsqlSymbols.filter((item) => item.type === "package").map((item) => item.id)).size,
       procedures: plsqlObjects.procedures.length, functions: plsqlObjects.functions.length, triggers: plsqlObjects.triggers.length,
       undefined_procedures: { count: undefinedProcedures.length, items: undefinedProcedures.slice(0, 50) },
+      ...(catalogSummary ? { catalog: catalogSummary } : {}),
     };
   }
   if (Object.values(uiFlow).some((items) => items.length)) output.ui_flow = { _meta: common, ...uiFlow };
@@ -5086,6 +5214,7 @@ export function buildIndex(options) {
   const existingPatchPath = join(resolveIndexDir(root, options.indexDir), "_ai_patch.json");
   const preservePatch = options.mode === "incremental" && existsSync(existingPatchPath);
   const config = loadConfig(root, options.config);
+  normalized.dbCatalog = loadDbCatalog(root, config);
   const { files, excluded: excludedSources } = listFiles(root, config.include_paths, config);
   const unsupportedFiles = discoverUnsupportedFiles(root, config.include_paths);
   /*

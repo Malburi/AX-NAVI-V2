@@ -21,7 +21,7 @@
           "annotations": { "type": "array", "items": { "type": "string" } },
           "signature": { "type": "string" }
           ,"workspace": { "type": "string" }
-          ,"origin": { "type": "string", "enum": ["deterministic-indexer", "ai-enrichment", "analyzer-fallback"] }
+          ,"origin": { "type": "string", "enum": ["deterministic-indexer", "ai-enrichment", "analyzer-fallback", "db-catalog"] }
           ,"confidence": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW"] }
           ,"note": { "type": "string" }
         }
@@ -39,7 +39,7 @@
           "file": { "type": "string" },
           "line": { "type": ["integer", "null"] }
           ,"workspace": { "type": "string" }
-          ,"origin": { "type": "string", "enum": ["deterministic-indexer", "ai-enrichment", "analyzer-fallback"] }
+          ,"origin": { "type": "string", "enum": ["deterministic-indexer", "ai-enrichment", "analyzer-fallback", "db-catalog"] }
           ,"confidence": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW"] }
           ,"evidence": { "type": "string" }
           ,"note": { "type": "string" }
