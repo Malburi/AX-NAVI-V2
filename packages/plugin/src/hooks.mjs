@@ -4,7 +4,7 @@
  *
  *   node packages/plugin/src/hooks.mjs session-start   SessionStart     인덱스 신선도 확인 · 바뀐 저장소만 다시 만든다
  *   node hooks.mjs prompt          UserPromptSubmit 턴 전 상태 기록 · 평가 횟수 초기화 · 사전 영향도를 맥락으로 넣는다
- *   node hooks.mjs pre-tool        PreToolUse       셸로 소스를 쓰면 승인 요청 · 디스크 전체 검색 차단 · 평가 서브에이전트 1번
+ *   node hooks.mjs pre-tool        PreToolUse       (AXNAVI_SHELL_WRITE_GUARD=1 일 때만) 셸로 소스를 쓰면 승인 요청 · 디스크 전체 검색 차단 · 평가 서브에이전트 1번
  *   node hooks.mjs stop            Stop             UTF-8 로 바뀐 EUC-KR 되돌리기 · 고친 뒤 위치 읽기 화면이 남으면 이어서 처리하게 한다
  *
  * 입력은 stdin 의 훅 JSON, 출력은 Claude Code 훅 규약의 JSON 이다. 어떤 실패도 작업을 막지 않는다 — 훅이 죽으면
@@ -102,6 +102,11 @@ async function preTool(input) {
     const { diskScanDecision } = await import("../../provider-claude-cli/src/disk-scan-guard.mjs");
     const disk = diskScanDecision(ti);
     if (disk.hookSpecificOutput) return disk;
+    /*
+     * 셸 소스 쓰기 승인은 기본으로 끈다. 셸 명령의 쓰기 대상은 끝까지 풀 수 없는 경우가 많아(`$root\…`, 표준입력 코드)
+     * 소스를 건드리지 않는 명령에도 확인 창이 거듭 떴다(SelfLearning harness-init 실측 3회). 쓰려면 AXNAVI_SHELL_WRITE_GUARD=1.
+     */
+    if (process.env["AXNAVI_SHELL_WRITE_GUARD"] !== "1") return null;
     const { writeGuardDecision } = await import("../../core/src/safety/write-guard.mjs");
     const cwd = input?.cwd || process.cwd();
     const decision = writeGuardDecision(tool, ti, { cwd, roots: projectRoots(cwd), pluginRoot: PLUGIN_ROOT });

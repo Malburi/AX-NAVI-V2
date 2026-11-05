@@ -1,5 +1,5 @@
 {
-  "description": "AX Navi 플러그인 훅 — 인덱스 신선도 · 사전 영향도 · 셸 소스 쓰기 승인 · 디스크 전체 검색 차단 · 평가 서브에이전트 1번 · EUC-KR 보존 · 고친 뒤 위치 읽기 화면 확인(packages/plugin/src/hooks.mjs, packages/provider-claude-cli/src/legacy-encoding-hook.mjs). axnavi CLI 로 실행하면 CLI 가 같은 일을 하고 이 훅들은 비킨다.",
+  "description": "AX Navi 플러그인 훅 — 인덱스 신선도 · 사전 영향도 · 셸 소스 쓰기 승인(AXNAVI_SHELL_WRITE_GUARD=1 일 때만) · 디스크 전체 검색 차단 · 평가 서브에이전트 1번 · EUC-KR 보존 · 고친 뒤 위치 읽기 화면 확인(packages/plugin/src/hooks.mjs, packages/provider-claude-cli/src/legacy-encoding-hook.mjs). axnavi CLI 로 실행하면 CLI 가 같은 일을 하고 이 훅들은 비킨다.",
   "hooks": {
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/packages/plugin/src/hooks.mjs\" session-start", "timeout": 180 }] }
