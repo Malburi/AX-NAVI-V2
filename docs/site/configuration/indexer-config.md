@@ -68,6 +68,7 @@ FAIL 이면 심층 패스(영역별 분석)를 처방한다. 영역 수는 파�
 - 질문에는 Claude 가 바로 DB 를 본다 — `db_source`(패키지 멤버 구간), `db_dependencies`, `db_table`(트리거·배치 잡까지), `db_objects`(한글 코멘트 검색). 데이터 값 확인은 `db_query`(SELECT/WITH 한 문장, 최대 200행).
 - **계정은 읽기 전용으로.** 모든 접속은 `SET TRANSACTION READ ONLY` 로 열고 SQL 사전 검사도 하지만, 진짜 보증은 계정 권한이다. 예: `CREATE USER axnavi_ro IDENTIFIED BY ...; GRANT CREATE SESSION, SELECT_CATALOG_ROLE TO axnavi_ro;` (다른 스키마 소스를 보려면 카탈로그 권한이 필요하다). `db_query` 로 업무 데이터를 보려면 필요한 테이블에만 `SELECT` 를 준다.
 - 드라이버(`oracledb`, Instant Client 불필요)는 첫 DB 도구 호출 때 자동 설치된다. 사내망에서 npm 이 막혀 실패하면 도구가 수동 설치 명령을 알려 준다. 연결 확인은 "DB 연결 상태 확인해줘"(`db_status`).
+- **thin 접속을 거부하는 DB.** 기본은 thin 모드다. DB 의 로그온 트리거가 클라이언트 버전을 확인해서 thin 접속을 거부하면(접속 시 `ORA-04088`·`ORA-20001` 오류에 최소 클라이언트 버전 안내가 나온다), 그 DB 가 요구하는 버전 이상의 Oracle Client 를 설치하고 `ORACLE_HOME` 을 설정한다(Windows 는 `ORACLE_HOME\bin` 에 `oci.dll` 이 있으면 자동으로 thick 모드를 쓴다). 다른 위치면 환경 변수 `AXNAVI_DB_CLIENT_LIB` 에 클라이언트 폴더를 지정한다. 환경 변수를 바꾼 뒤에는 Claude Code 를 다시 시작하거나 `/mcp` 에서 `plugin:ax-navi:db` 를 재연결한다. Client 초기화에 실패해도 thin 으로 계속 시도하며, 접속 오류 끝에 초기화 실패 사유가 붙는다.
 
 **DB 덤프 넣는 법(손으로).** 업무 로직이 오라클 패키지·프로시저에 있는 시스템은 소스 저장소만으로는 분석이 끊긴다. 덤프를 프로젝트 안(예: `db/dump/`)에 두고 `"db_dump_paths": ["db/dump"]`를 설정한다.
 

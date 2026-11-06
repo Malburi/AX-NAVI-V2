@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { buildIndex } from "../build-index.mjs";
 import { handle } from "../../../packages/db-mcp/server.mjs";
 import { loadDbConfig } from "../../../packages/db-mcp/src/config.mjs";
+import { connectOracle, enableThickMode } from "../../../packages/db-mcp/src/driver.mjs";
 import { dbExport } from "../../../packages/db-mcp/src/export.mjs";
 import { TOOLS } from "../../../packages/db-mcp/src/oracle-tools.mjs";
 import { checkReadOnlySql } from "../../../packages/db-mcp/src/sql-guard.mjs";
@@ -198,6 +199,71 @@ public class A {
       assert.ok(secret?.wrapped, `암호화돼 받을 수 없는 프로시저 표시: ${JSON.stringify(meta.undefined_procedures)}`);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+  register("thick 모드: Oracle Client 폴더가 있으면 초기화하고, 환경 변수 지정이 ORACLE_HOME 보다 우선한다", () => {
+    const home = mkdtempSync(join(tmpdir(), "ax-ora-home-"));
+    const custom = mkdtempSync(join(tmpdir(), "ax-ora-lib-"));
+    try {
+      mkdirSync(join(home, "bin"), { recursive: true });
+      writeFileSync(join(home, "bin", "oci.dll"), "x");
+      const fake = () => { const calls = []; return { calls, initOracleClient: (o) => calls.push(o.libDir) }; };
+
+      const a = fake();
+      const sa = enableThickMode(a, { ORACLE_HOME: home });
+      assert.equal(sa.mode, "thick");
+      assert.equal(a.calls.join("|"), join(home, "bin"), "ORACLE_HOME\\bin 의 oci.dll 로 자동 감지");
+      enableThickMode(a, { ORACLE_HOME: home });
+      assert.equal(a.calls.length, 1, "같은 드라이버에는 한 번만 초기화");
+
+      const b = fake();
+      enableThickMode(b, { ORACLE_HOME: home, AXNAVI_DB_CLIENT_LIB: custom });
+      assert.equal(b.calls.join("|"), custom, "AXNAVI_DB_CLIENT_LIB 가 우선(파일 확인 없이 시도)");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(custom, { recursive: true, force: true });
+    }
+  });
+
+  register("thick 모드: 클라이언트가 없으면 thin 그대로, 초기화에 실패해도 접속을 막지 않고 사유를 오류에 덧붙인다", async () => {
+    const empty = mkdtempSync(join(tmpdir(), "ax-ora-empty-"));
+    try {
+      let inited = 0;
+      const none = { initOracleClient: () => { inited += 1; } };
+      assert.equal(enableThickMode(none, { ORACLE_HOME: empty }).mode, "thin", "oci.dll 이 없으면 thin");
+      assert.equal(enableThickMode({ initOracleClient: () => { inited += 1; } }, {}).mode, "thin", "설정이 없으면 thin");
+      assert.equal(inited, 0, "클라이언트가 없으면 초기화를 시도하지 않는다");
+
+      const failing = { initOracleClient: () => { throw new Error("DPI-1047: Cannot locate a 64-bit Oracle Client library\nmore"); } };
+      const state = enableThickMode(failing, { AXNAVI_DB_CLIENT_LIB: empty });
+      assert.equal(state.mode, "thin", "실패해도 예외로 막지 않는다");
+      assert.ok(/초기화 실패/.test(state.error) && /DPI-1047/.test(state.error) && !/more/.test(state.error), state.error);
+
+      /* 접속이 실패하면 오류 끝에 thick 초기화 실패 사유가 붙는다 */
+      const driver = {
+        CLOB: 1,
+        initOracleClient: () => { throw new Error("DPI-1047"); },
+        getConnection: async () => { throw new Error("ORA-20001: 접속 불가"); },
+      };
+      const dataDir = mkdtempSync(join(tmpdir(), "ax-ora-data-"));
+      try {
+        mkdirSync(join(dataDir, "node_modules", "oracledb"), { recursive: true });
+        writeFileSync(join(dataDir, "node_modules", "oracledb", "package.json"), JSON.stringify({ name: "oracledb", main: "index.js" }));
+        writeFileSync(join(dataDir, "node_modules", "oracledb", "index.js"), "module.exports = global.__fakeOracledb;");
+        globalThis.__fakeOracledb = driver;
+        let thrown = null;
+        try {
+          await connectOracle({ host: "h", port: "1521", service: "s", user: "u", password: "p" }, { CLAUDE_PLUGIN_DATA: dataDir, AXNAVI_DB_CLIENT_LIB: empty });
+        } catch (error) {
+          thrown = error;
+        }
+        assert.ok(thrown && /ORA-20001/.test(thrown.message) && /thick 모드/.test(thrown.message) && /thin 모드로 접속을 시도/.test(thrown.message), `접속 오류에 사유가 붙어야 함: ${thrown?.message}`);
+      } finally {
+        delete globalThis.__fakeOracledb;
+        rmSync(dataDir, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
     }
   });
 }
