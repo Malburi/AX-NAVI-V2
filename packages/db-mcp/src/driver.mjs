@@ -14,10 +14,15 @@ import { dirname, join } from "node:path";
 export const ORACLEDB_VERSION = "6.10.0";
 const CALL_TIMEOUT_MS = 30_000;
 
-/** 드라이버를 둘 폴더. 플러그인 밖에서 띄우면(테스트·수동 실행) 사용자 폴더 아래 같은 이름을 쓴다. */
+/**
+ * 드라이버를 둘 폴더. MCP 서버 env 의 `${CLAUDE_PLUGIN_DATA}` 는 풀리지 않고 글자 그대로 오는 경우가 있어(실측: 경로
+ * 마켓플레이스 설치) 그때는 Claude 설정 폴더(CLAUDE_CONFIG_DIR, 없으면 ~/.claude) 아래 같은 자리를 쓴다.
+ */
 export function dataDir(env = process.env) {
   const value = String(env["CLAUDE_PLUGIN_DATA"] ?? "").trim();
-  return value && !value.startsWith("${") ? value : join(homedir(), ".claude", "plugins", "data", "ax-navi-ax-navi");
+  if (value && !value.startsWith("${")) return value;
+  const configDir = String(env["CLAUDE_CONFIG_DIR"] ?? "").trim() || join(homedir(), ".claude");
+  return join(configDir, "plugins", "data", "ax-navi-ax-navi");
 }
 
 /** npm 을 셸 없이 부를 방법. node 옆의 npm-cli.js 를 node 로 직접 돌리는 것이 먼저다(Windows 의 npm.cmd 는 셸이 필요하다). */
