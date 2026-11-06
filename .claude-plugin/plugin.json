@@ -27,7 +27,7 @@
     "db_port": { "type": "string", "title": "Oracle 포트", "description": "리스너 포트", "default": "1521" },
     "db_service": { "type": "string", "title": "Oracle 서비스 이름", "description": "서비스 이름(SID 가 아니라 SERVICE_NAME)", "default": "" },
     "db_user": { "type": "string", "title": "DB 계정 (읽기 전용 권장)", "description": "CREATE SESSION + SELECT_CATALOG_ROLE 만 가진 읽기 전용 계정을 권합니다.", "default": "" },
-    "db_password": { "type": "string", "title": "DB 비밀번호", "description": "보안 저장소에 보관되고 설정 파일에는 남지 않습니다.", "sensitive": true, "default": "" },
+    "db_password": { "type": "string", "title": "DB 비밀번호", "description": "Claude Code 자격 증명 저장소에 보관되고 설정 파일·프로젝트에는 남지 않습니다(Windows 는 ~/.claude/.credentials.json). 읽기 전용 계정을 쓰세요.", "sensitive": true, "default": "" },
     "db_owners": { "type": "string", "title": "분석할 스키마", "description": "쉼표로 구분한 소유자(스키마) 이름. 비우면 접속 계정의 스키마.", "default": "" }
   },
   "mcpServers": {

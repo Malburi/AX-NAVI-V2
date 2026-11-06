@@ -61,7 +61,7 @@ FAIL 이면 심층 패스(영역별 분석)를 처방한다. 영역 수는 파�
 
 결과는 `_workspace/report_depth.json`에 남는다(판정·지표·하한·처방). 하한이 맞지 않는 프로젝트를 만나면 이 파일의 지표를 보고 조정한다.
 
-**DB 에서 바로 받기 (Oracle, 권장).** 플러그인에 DB 도구가 들어 있다. `/plugin configure ax-navi@ax-navi` 에서 호스트·포트·서비스·계정·비밀번호·분석할 스키마를 넣으면(비밀번호는 보안 저장소에 보관) Claude 가 DB 도구를 쓸 수 있다. 프로젝트마다 DB 가 다르면 프로젝트 `.env` 에 `ORACLE_HOST`·`ORACLE_PORT`·`ORACLE_SERVICE`·`ORACLE_USER`·`ORACLE_PASSWORD`·`ORACLE_OWNERS` 를 두면 그쪽이 우선한다.
+**DB 에서 바로 받기 (Oracle, 권장).** 플러그인에 DB 도구가 들어 있다. `/plugin configure ax-navi@ax-navi` 에서 호스트·포트·서비스·계정·비밀번호·분석할 스키마를 넣으면(비밀번호는 Claude Code 자격 증명 저장소에 보관 — Windows·Linux 는 `~/.claude/.credentials.json` 평문이라 계정을 읽기 전용으로 만드는 것이 실제 안전장치다) Claude 가 DB 도구를 쓸 수 있다. 프로젝트마다 DB 가 다르면 프로젝트 `.env` 에 `ORACLE_HOST`·`ORACLE_PORT`·`ORACLE_SERVICE`·`ORACLE_USER`·`ORACLE_PASSWORD`·`ORACLE_OWNERS` 를 두면 그쪽이 우선한다.
 
 - "DB 덤프 받아줘"(`db_export`) — `db/dump/` 에 객체별 PL/SQL 소스·테이블 DDL과 `_catalog.json`(DB 사전: 객체 상태·암호화 여부·컴파일러 의존·트리거·배치 잡·한글 코멘트·제약)을 쓰고 `db_dump_paths` 에 등록한다. 이어서 "인덱스만 갱신해줘". 다시 받으면 바뀐 객체만 쓴다.
 - 인덱스에는 정규식 결과에 더해 `db_references`(컴파일러 기준 참조, 파서가 못 본 테이블은 `not_in_source_parse`), `scheduled_by`(어느 배치 잡이 부르나 — call_graph `scheduler` 엣지), `db_status`·`wrapped`, 테이블·컬럼 `comment` 가 붙는다.
