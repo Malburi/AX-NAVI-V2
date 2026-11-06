@@ -26,6 +26,8 @@ v2 에서 바뀐 것: 실제 레거시(백엔드 + 화면 저장소)에서 화�
 
 대상이 SQL · 컬럼이 아니면 정규화한다: 파일 → `symbol --file`, DB 컬럼 → `table --table` · `column --name`(그리드 열 화면), 엔드포인트 → `endpoint --path`.
 
+DB 쪽(프로시저·트리거·배치 잡)은 `schema --table` 의 `accessed_by` 와 `schema.json` 의 `db_references`·`scheduled_by` 가 근거다. 인덱스에 없는 DB 객체를 만나고 AX Navi DB 도구가 있으면 `db_dependencies`(누가 이 테이블·패키지를 참조하나, 컴파일러 기준)와 `db_table`(트리거·배치 잡)로 확인한다 — 추정으로 채우지 않는다.
+
 결과 읽기:
 - `summary` — 저장소 · 코드 호출자 · 화면 호출 수 · 컬럼을 빼면 깨지는 곳.
 - `screen_callers[]` — `verdict`(`breaks` 깨짐 · `reads_by_position` 위치로 읽음 · `reads_by_name` · `unaffected`), `repo/file:line`, `callback`, `reads[]`(무엇을 읽다가 무엇을 읽게 되는지).

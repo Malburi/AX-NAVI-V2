@@ -61,7 +61,15 @@ FAIL 이면 심층 패스(영역별 분석)를 처방한다. 영역 수는 파�
 
 결과는 `_workspace/report_depth.json`에 남는다(판정·지표·하한·처방). 하한이 맞지 않는 프로젝트를 만나면 이 파일의 지표를 보고 조정한다.
 
-**DB 덤프 넣는 법.** 업무 로직이 오라클 패키지·프로시저에 있는 시스템은 소스 저장소만으로는 분석이 끊긴다. 덤프를 프로젝트 안(예: `db/dump/`)에 두고 `"db_dump_paths": ["db/dump"]`를 설정한다.
+**DB 에서 바로 받기 (Oracle, 권장).** 플러그인에 DB 도구가 들어 있다. `/plugin configure ax-navi@ax-navi` 에서 호스트·포트·서비스·계정·비밀번호·분석할 스키마를 넣으면(비밀번호는 Claude Code 자격 증명 저장소에 보관 — Windows·Linux 는 `~/.claude/.credentials.json` 평문이라 계정을 읽기 전용으로 만드는 것이 실제 안전장치다) Claude 가 DB 도구를 쓸 수 있다. 프로젝트마다 DB 가 다르면 프로젝트 `.env` 에 `ORACLE_HOST`·`ORACLE_PORT`·`ORACLE_SERVICE`·`ORACLE_USER`·`ORACLE_PASSWORD`·`ORACLE_OWNERS` 를 두면 그쪽이 우선한다.
+
+- "DB 덤프 받아줘"(`db_export`) — `db/dump/` 에 객체별 PL/SQL 소스·테이블 DDL과 `_catalog.json`(DB 사전: 객체 상태·암호화 여부·컴파일러 의존·트리거·배치 잡·한글 코멘트·제약)을 쓰고 `db_dump_paths` 에 등록한다. 이어서 "인덱스만 갱신해줘". 다시 받으면 바뀐 객체만 쓴다.
+- 인덱스에는 정규식 결과에 더해 `db_references`(컴파일러 기준 참조, 파서가 못 본 테이블은 `not_in_source_parse`), `scheduled_by`(어느 배치 잡이 부르나 — call_graph `scheduler` 엣지), `db_status`·`wrapped`, 테이블·컬럼 `comment` 가 붙는다.
+- 질문에는 Claude 가 바로 DB 를 본다 — `db_source`(패키지 멤버 구간), `db_dependencies`, `db_table`(트리거·배치 잡까지), `db_objects`(한글 코멘트 검색). 데이터 값 확인은 `db_query`(SELECT/WITH 한 문장, 최대 200행).
+- **계정은 읽기 전용으로.** 모든 접속은 `SET TRANSACTION READ ONLY` 로 열고 SQL 사전 검사도 하지만, 진짜 보증은 계정 권한이다. 예: `CREATE USER axnavi_ro IDENTIFIED BY ...; GRANT CREATE SESSION, SELECT_CATALOG_ROLE TO axnavi_ro;` (다른 스키마 소스를 보려면 카탈로그 권한이 필요하다). `db_query` 로 업무 데이터를 보려면 필요한 테이블에만 `SELECT` 를 준다.
+- 드라이버(`oracledb`, Instant Client 불필요)는 첫 DB 도구 호출 때 자동 설치된다. 사내망에서 npm 이 막혀 실패하면 도구가 수동 설치 명령을 알려 준다. 연결 확인은 "DB 연결 상태 확인해줘"(`db_status`).
+
+**DB 덤프 넣는 법(손으로).** 업무 로직이 오라클 패키지·프로시저에 있는 시스템은 소스 저장소만으로는 분석이 끊긴다. 덤프를 프로젝트 안(예: `db/dump/`)에 두고 `"db_dump_paths": ["db/dump"]`를 설정한다.
 
 - **DDL만으로는 부족하다.** 테이블 DDL 외에 패키지 스펙+바디(`.pks`·`.pkb`) 소스가 있어야 프로시저가 읽고 쓰는 테이블과 호출 관계가 잡힌다. `DBMS_METADATA.GET_DDL` 또는 `ALL_SOURCE`(PACKAGE·PACKAGE BODY·PROCEDURE·FUNCTION·TRIGGER)로 뽑는다.
 - **객체별로 나눠 받는 편이 좋다.** 한 파일이 32MB를 넘으면 `_meta.excluded_sources`에 `too-large`로 기록되고 읽지 않는다(4MB 초과 파일은 설정이 없어도 같은 방식으로 기록). 큰 파일일수록 인덱싱이 선형보다 느리게 늘어난다(실측: 5.6MB 약 4초, 18MB 약 24초).

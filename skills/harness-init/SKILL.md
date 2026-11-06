@@ -315,6 +315,7 @@ node "${CLAUDE_PLUGIN_ROOT}/agents/lib/ai-budget.mjs" estimate --root "[절대�
 DB 소스: 테이블 [N] · 뷰 [N] · 패키지 [N] · 프로시저/함수 [N] · 트리거 [N] (읽은 파일 [N]개)
 정의가 없는 프로시저: [undefined_count]개 — 코드는 부르지만 이 저장소에 소스가 없음. 호출 많은 순: [상위 3개와 호출 수]
   → 이 프로시저들의 소스를 덤프로 넣으면 판정 로직까지 분석됩니다(아래 Phase 3 안내).
+  → [AX Navi DB 도구(`db_export`)가 이 세션에 있으면] DB 에서 바로 받아 올 수 있습니다 — 아래 'DB 에서 받아 오기'.
 
 이제 LLM 분석 구간입니다. 예상 규모:
   Tier [tier] 기준 · 약 [estimated_minutes]분 · 약 [estimated_tokens] 토큰
@@ -594,6 +595,13 @@ Agent(
     `\"db_dump_paths\": [\"db/dump\"]`를 추가한 뒤 '인덱스만 갱신해줘'(`--mode incremental`)를 실행하세요. `.pks`·`.pkb`·`.prc`·`.fnc`·`.trg`
     확장자는 설정 없이도 읽습니다. 덤프는 커밋하지 마세요(업무 로직·스키마 포함, 데이터 행은 넣지 않음). 만드는 법은 docs/site/configuration/indexer-config.md."
   - `--mode init`으로 다시 만들면 AI 판정 패치가 사라지므로 `incremental`을 쓴다.
+  - **DB 에서 받아 오기.** AX Navi DB 도구(MCP `db_export`, 플러그인 설정에 Oracle 접속 정보가 있을 때 나타난다)가 있으면 손으로 덤프를 뜰 필요가 없다.
+    사용자에게 "정의 없는 프로시저 N개의 소스를 DB 에서 받아 올까요?"라고 한 번 묻고, 승인하면 `db_export`(`only_undefined: true`)를 부른 뒤
+    pipeline-runner 로 `--mode incremental` 인덱싱을 다시 돌린다. 반환의 `plsql.wrapped`(암호화돼 읽을 수 없는 객체)와 `skipped`(권한 부족)는 그대로 보고한다.
+    구조 전체(테이블 DDL·코멘트·배치 잡·컴파일러 의존)까지 넣으려면 `only_undefined` 없이 부른다. 도구가 없으면 "`/plugin configure ax-navi@ax-navi`
+    에서 DB 접속 정보를 넣으면 자동으로 받아 올 수 있습니다"라고 안내만 한다.
+  - `db_source.catalog`가 있으면(DB 사전을 받은 인덱스) `invalid_objects`·`wrapped_objects`·`jobs_linked`(배치 잡이 이어진 수)를 한 줄로 보인다.
+  - 정의 없는 프로시저 항목에 `wrapped: true`가 있으면 "DB 에 있지만 암호화돼 소스를 받을 수 없음"이라고 쓴다.
 - `db_source`가 없으면 이 절을 생략한다(DB 소스도 프로시저 호출도 없는 프로젝트).
 
 구조 검증 (validator):

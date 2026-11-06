@@ -15,6 +15,7 @@ import { test as registerCoverageReportTests } from "./coverage-report.test.mjs"
 import { test as registerDispatchTests, testLargeFile as registerLargeFileTests } from "./dispatch.test.mjs";
 import { test as registerWriteGuardTests } from "./write-guard.test.mjs";
 import { test as registerReportDepthTests } from "./report-depth.test.mjs";
+import { test as registerDbMcpTests } from "./db-mcp.test.mjs";
 
 const tests = [];
 function test(name, fn) {
@@ -47,6 +48,7 @@ await registerSiteTests(test, assert);
 await registerCoverageReportTests(test, assert);
 await registerWriteGuardTests(test, assert);
 await registerReportDepthTests(test, assert);
+await registerDbMcpTests(test, assert);
 
 let passed = 0,
   failed = 0;
