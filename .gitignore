@@ -11,3 +11,4 @@ presentation.html
 wiki_hub.db
 *.db-wal
 *.db-shm
+deploy/oracle-driver/

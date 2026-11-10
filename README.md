@@ -142,6 +142,10 @@ claude plugin update ax-navi@ax-navi
 
 적용은 새 세션에서 됩니다. 새 판에서 달라진 점은 [변경 이력](docs/changelog.md)에 있습니다.
 
+### GitHub 에 접속되지 않는 사내망
+
+관리자가 이 저장소를 사내 공유폴더에 올려 두면 사용자는 `deploy\install.cmd` 를 실행하기만 하면 설치·갱신됩니다. 절차는 [사내 설치 가이드](deploy/install-guide.html)에 있습니다. GitHub 에 접속되는 사람은 위 방법을 그대로 쓰면 됩니다.
+
 ### 설치 확인
 
 Claude Code 에서 `/plugin list` 에 `ax-navi@ax-navi — enabled` 가 보이면 됩니다.
