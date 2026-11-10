@@ -6,7 +6,7 @@
 
 ITO/SI/SM 현장을 위한 Claude Code 플러그인 — 코드베이스 지도를 먼저 만들고, 그 지도를 근거로 찾고 · 따라가고 · 고칩니다.
 
-[![version](https://img.shields.io/badge/version-0.3.10-0F7B85)](docs/changelog.md)
+[![version](https://img.shields.io/badge/version-0.3.12-0F7B85)](docs/changelog.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](#라이선스)
 [![node](https://img.shields.io/badge/node-%E2%89%A518-339933)](#요구-사항)
 [![platform](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-555)](#설치)
@@ -36,7 +36,7 @@ Claude Code 안에서 설치해 씁니다. 별도 실행 프로그램은 없습�
 | 컨벤션을 모르는데 고쳐야 한다 | `/ax-navi:modify 승인 시각을 함께 저장하게 해줘` |
 | 기존 패턴 그대로 새 기능을 붙여야 한다 | `/ax-navi:scaffold 공지사항 첨부파일 기능 추가` |
 | 이 쿼리 괜찮은지 모르겠다 | `/ax-navi:sql 이 쿼리 성능 괜찮아?` |
-| 업무 로직이 오라클 패키지에 있다 | DB 덤프를 넣고 인덱스 갱신 — [DB 덤프까지 분석하기](#db-덤프까지-분석하기) |
+| 업무 로직이 오라클 패키지에 있다 | `/plugin configure ax-navi@ax-navi` 로 DB 를 연결하고 `이 패키지 소스 보여줘` · `DB 덤프 받아줘` — [DB 까지 분석하기](#db-덤프까지-분석하기) |
 | 백엔드 · 프론트 저장소를 함께 고친다 | `pair-init` 으로 연결한 뒤 `cross-repo-modify` |
 | 인수인계 문서가 없다 | `/ax-navi:wiki` |
 
@@ -71,7 +71,7 @@ Claude Code 안에서 한 번만 합니다.
 - **고치기 전에 영향을 계산합니다.** 영향도 → 변경 → 컨벤션 · 검증 · 안전성 점검 순으로, 인덱스로 먼저 잡고 위험한 변경에서만 LLM 평가를 한 번 돌립니다.
 - **분석이 얕으면 막습니다.** 인덱스 요약만 옮긴 리포트가 평가를 통과하던 구멍을 결정론적 깊이 게이트로 막고, 영역별 심층 분석으로 메웁니다.
 - **SI 현장의 레거시를 압니다.** Spring · Struts · MyBatis 는 물론 Nexacro · PowerBuilder · Pro*C · PL/SQL 까지, EUC-KR 파일도 인코딩을 지키며 고칩니다.
-- **업무 로직이 DB 에 있어도 끊기지 않습니다.** Oracle · MSSQL · MySQL · PostgreSQL 덤프를 넣으면 프로시저 · 트리거 · 뷰까지 같은 지도에 잇습니다.
+- **업무 로직이 DB 에 있어도 끊기지 않습니다.** Oracle 은 플러그인 설정만으로 DB 에 읽기 전용으로 붙어 패키지 소스 · 컴파일러 기준 의존 · 배치 잡 · 한글 코멘트까지 읽고, MSSQL · MySQL · PostgreSQL 은 덤프를 넣으면 프로시저 · 트리거 · 뷰까지 같은 지도에 잇습니다.
 
 <details>
 <summary>그 밖의 장점</summary>
@@ -97,7 +97,7 @@ Claude Code 안에서 한 번만 합니다.
 - [지원 스택](#지원-스택)
 - [구성](#구성)
 
-현재 버전 **0.3.10**
+현재 버전 **0.3.12**
 
 ---
 
@@ -111,6 +111,7 @@ Claude Code 안에서 한 번만 합니다.
 | **Node.js** | 18 이상 | 결정론적 인덱서 · 견적 · 스키마 검증 (npm 의존성 없음) |
 | git | 아무 버전 | 하네스 공유 · 변경 범위 표시 |
 | Python | 3.10 이상 권장 | 하네스 조립 · 패턴 프로필 검증 · 위키 생성 |
+| Oracle Instant Client | 선택 | DB 도구로 thin 접속을 거부하는 DB 에 붙을 때만(thick 모드). Oracle 드라이버 자체는 DB 도구를 처음 쓸 때 npm 으로 자동 설치됩니다 |
 
 Python 인터프리터 이름은 `python3` → `python` → `py` 순서로 찾습니다. Node 가 없으면 인덱서 대신 스택별 Python 추출기가 기본 인덱스만 만들고, Python 이 없으면 해당 단계만 WARN 으로 건너뜁니다.
 
@@ -225,6 +226,7 @@ node <플러그인 루트>/agents/lib/query-index.mjs schema --root <프로젝�
 
 - "이 패키지 소스 보여줘" · "이 테이블 쓰는 프로시저 · 트리거 · 배치 뭐 있어?" — Claude 가 DB 사전(ALL_SOURCE · ALL_DEPENDENCIES · 스케줄러 잡 · 코멘트)을 바로 봅니다.
 - "DB 덤프 받아줘" 뒤 "인덱스만 갱신해줘" — 소스 · DDL 과 DB 사전이 인덱스에 들어가, 영향도 · 흐름 추적이 배치 잡과 컴파일러 기준 의존까지 잇습니다. 하네스 초기화도 정의 없는 프로시저가 있으면 받아 올지 묻습니다.
+- 접속 시 `ORA-04088` · `ORA-20001`(허용되지 않는 클라이언트)이 나오면 DB 가 thin 접속을 거부하는 것입니다. 그 DB 가 요구하는 버전 이상의 Oracle Client 를 설치하고 `ORACLE_HOME` 을 설정하면(Windows 는 `ORACLE_HOME\bin` 에 `oci.dll` 이 있으면) 자동으로 thick 모드로 붙습니다. 다른 위치면 환경 변수 `AXNAVI_DB_CLIENT_LIB` 에 폴더를 지정합니다.
 - 모든 조회는 읽기 전용 트랜잭션에서 돌고, 데이터 조회(`db_query`)는 SELECT 한 문장 · 200행까지입니다. 계정 자체를 읽기 전용(`CREATE SESSION` + `SELECT_CATALOG_ROLE`)으로 만드세요. 자세한 건 [인덱서 설정](docs/site/configuration/indexer-config.md).
 
 손으로 덤프를 넣는 방법(다른 DB 포함)은 아래와 같습니다.
@@ -282,7 +284,7 @@ v1 을 평범한 Claude Code 와 같은 과제로 비교해 보니 강점은 **�
 
 - **인덱스 2.0 — 코드에 안 보이는 연결.** 화면이 `TransData.do?worker=…&action=…` 처럼 문자열로 서버 메서드를 부르고 결과를 `rtInfo[1][2]` 처럼 위치로 읽는 구조를 설정 없이 찾아 백엔드 메서드 · SQL 컬럼 순서와 잇습니다. `query-index impact` 한 번으로 짝 저장소 화면까지 "이 컬럼을 빼면 어디가 깨지는지"가 나옵니다. 이런 메서드를 죽은 코드로 보지 않습니다.
 - **가벼운 수정 절차.** safe-modify · cross-repo-modify 는 영향도를 인덱스로 먼저 잡고, 고친 뒤에는 결정적 검사(재영향도 · 검증 명령)가 기본입니다. LLM 재평가는 DDL · 트랜잭션 · 인증 · 데이터 변경 같은 위험한 변경에서만 한 번 돕니다.
-- **0.3 대에서 더해진 것.** DB 덤프(Oracle · MSSQL · MySQL · PostgreSQL) 분석, 분석 깊이 게이트와 영역별 심층 분석, 사전 견적 · 예산, 인덱스 스키마 검증. 판마다의 내용은 [변경 이력](docs/changelog.md).
+- **0.3 대에서 더해진 것.** DB 덤프(Oracle · MSSQL · MySQL · PostgreSQL) 분석, 플러그인 내장 Oracle DB 도구(0.3.11 — 읽기 전용 접속 · DB 사전을 인덱스에 병합, 0.3.12 — thin 접속을 거부하는 DB 에 thick 모드), 분석 깊이 게이트와 영역별 심층 분석, 사전 견적 · 예산, 인덱스 스키마 검증. 판마다의 내용은 [변경 이력](docs/changelog.md).
 
 **같은 과제 재측정 (방식마다 3회 평균, AX-NAVI CLI 실행기 기준)**
 
@@ -406,10 +408,10 @@ PARTIAL 대상은 에이전트가 원문을 직접 읽어 확인한 뒤 수정�
 | `agents/` | 전문 에이전트 19종 (`agents/lib/` 결정론적 인덱서 · 질의 · 검증 스크립트) |
 | `skills/` | 워크플로우 스킬 17종 + 단축 별칭 7종 |
 | `hooks/hooks.json` | 위 표의 플러그인 훅 |
-| `packages/` | 훅이 쓰는 런타임 모듈만 담은 것(쓰기 판정 · 턴 감사 · 고친 뒤 검증 · 인코딩 보존). 실행기는 들어 있지 않습니다 |
+| `packages/` | 훅이 쓰는 런타임 모듈(쓰기 판정 · 턴 감사 · 고친 뒤 검증 · 인코딩 보존)과 DB 도구 MCP 서버(`packages/db-mcp/`). 실행기는 들어 있지 않습니다 |
 | `docs/` | 소개 페이지(`docs/index.html`), 사용자 문서(`docs/site/`), 인덱스 스키마(`docs/index-schema/`), 변경 이력 |
 
-이 저장소는 [AX-NAVI-CLI](https://github.com/Malburi/AX-NAVI-CLI) 의 `scripts/build-plugin.mjs` 로 만들어집니다.
+0.3.7 부터 이 저장소가 플러그인 원본입니다. 플러그인 부품(에이전트 · 스킬 · 훅 · 런타임 모듈)은 여기서 고치고, [AX-NAVI-CLI](https://github.com/Malburi/AX-NAVI-CLI) 의 `scripts/build-plugin.mjs` 로 덮어쓰지 않습니다.
 
 ### 문서
 
