@@ -63,7 +63,7 @@ export async function test(register, assert) {
     assert.equal(marketplace.renames["ax-std-harness"], "ax-navi");
     assert.equal(marketplace.renames["total-ito"], "ax-navi", "직전 이름 total-ito에서 자동 승계돼야 함");
     assert.equal(marketplace.plugins[0].name, "ax-navi");
-    assert.equal(marketplace.plugins[0].source, ".");
+    assert.equal(marketplace.plugins[0].source, "./");
     assert.equal(marketplace.plugins[0].homepage, "https://github.com/Malburi/AX-NAVI-V2");
     assert.ok(existsSync(join(root, marketplace.plugins[0].source, ".claude-plugin", "plugin.json")));
   });
