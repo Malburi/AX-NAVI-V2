@@ -117,7 +117,7 @@ Python 인터프리터 이름은 `python3` → `python` → `py` 순서로 찾�
 
 Python 설치(Windows)는 다음 순서로 합니다.
 
-1. python.org 또는 사내 배포판으로 3.10 이상을 설치하고, 첫 화면에서 **Add python.exe to PATH** 를 체크합니다.
+1. [python.org](https://www.python.org/downloads/) 에서 3.10 이상을 받아 설치하고, 첫 화면에서 **Add python.exe to PATH** 를 체크합니다.
 2. 설정 > 앱 > 고급 앱 설정 > 앱 실행 별칭에서 `python.exe` · `python3.exe` 를 끕니다(Microsoft Store 로 연결되는 가짜 실행 파일).
 3. 새 터미널에서 `python --version` 이 3.10 이상으로 나오는지 확인하고 Claude Code 를 다시 실행합니다.
 

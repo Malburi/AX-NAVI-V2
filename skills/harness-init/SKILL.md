@@ -37,7 +37,7 @@ CLAUDE.md·스킬 조립(`skills_builder.py`), 패턴·하네스 검증, 리포�
 
 ```
 하네스 초기화에는 Python 3.10 이상이 필요합니다. [찾지 못했습니다 | 찾은 판: 3.x.y]
-1. python.org 또는 사내 배포판으로 3.10 이상을 설치하고, 첫 화면에서 'Add python.exe to PATH' 를 체크합니다.
+1. python.org(https://www.python.org/downloads/)에서 3.10 이상을 받아 설치하고, 첫 화면에서 'Add python.exe to PATH' 를 체크합니다.
 2. (Windows) 설정 > 앱 > 고급 앱 설정 > 앱 실행 별칭에서 python.exe, python3.exe 를 끕니다.
 3. 새 터미널에서 python --version 을 확인하고 Claude Code 를 다시 실행한 뒤 "하네스 초기화" 를 다시 요청하세요.
 ```

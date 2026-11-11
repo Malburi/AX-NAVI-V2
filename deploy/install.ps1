@@ -132,7 +132,7 @@ Say "DB 를 쓰려면 Claude Code 에서 /plugin configure ax-navi@ax-navi 로 �
 if (-not $python) {
   Say ""
   Say "[경고] 하네스 초기화 전에 Python 3.10 이상을 설치하세요." "Yellow"
-  Say "  1. python.org 또는 사내 배포판으로 설치하고, 첫 화면에서 'Add python.exe to PATH' 를 체크합니다." "Yellow"
+  Say "  1. python.org(https://www.python.org/downloads/)에서 3.10 이상을 받아 설치하고, 첫 화면에서 'Add python.exe to PATH' 를 체크합니다." "Yellow"
   Say "  2. 설정 > 앱 > 고급 앱 설정 > 앱 실행 별칭에서 python.exe, python3.exe 를 끕니다(Store 연결용 가짜 실행 파일)." "Yellow"
   Say "  3. 새 터미널에서 python --version 이 3.10 이상으로 나오는지 확인하고 Claude Code 를 다시 실행합니다." "Yellow"
 }
