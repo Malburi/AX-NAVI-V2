@@ -632,7 +632,7 @@ Section B/D의 기계 집계는 LLM이 읽어 복사하지 않는다. 아래 리
 스크립트는 플러그인 설치 루트의 `agents/lib/analyzer_index_summary.py`다. 스크립트 경로의
 `${CLAUDE_PLUGIN_ROOT}`는 이 지침을 불러올 때 플러그인 설치 절대경로로 바뀐다. 적힌 경로를 그대로
 실행하고, 스크립트를 찾으려고 디스크를 검색하지 않는다. 대상 프로젝트 cwd의 상대경로로 실행하지 않는다.
-Python은 `python3 --version` 성공 시 `python3`, 아니면 `python`을 사용한다.
+Python은 `python3 --version` 성공 시 `python3`, 아니면 `python`, 그것도 아니면 `py -3`을 사용한다.
 
 업무 목적·사용자·핵심 규칙·분기·예외는 분석 중 확인한 근거로 아래 업무 섹션에 한 번만 쓴다.
 공통 모듈 설명을 API마다 반복하지 않는다. API와 외부 통신의 역할이 실제로 같은 항목들은
