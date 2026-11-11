@@ -107,7 +107,7 @@ robocopy C:\temp\ax-navi \\파일서버\공유\ax-navi /MIR /XD .git C:\temp\ax-
       <li>설치 설명서: <code>\\파일서버\공유\ax-navi\deploy\user-guide.html</code></li>
       <li>활용 가이드: <code>\\파일서버\공유\ax-navi\deploy\usage-guide.html</code> (워크플로우·아키텍처 그림, 스킬별 사용법)</li>
     </ul>
-    <p>사용자 PC 에는 Claude Code 와 Node.js 18 이상이 있어야 합니다. Git 은 필요 없습니다.</p>
+    <p>사용자 PC 에는 Claude Code, Node.js 18 이상, Python 3.10 이상이 있어야 합니다. Git 은 필요 없습니다. Python 은 하네스 초기화(CLAUDE.md·스킬 조립, 검증, 위키 생성)에 쓰이고, 없으면 <code>install.cmd</code> 가 경고와 설치 안내를 띄웁니다(플러그인 설치는 계속됩니다). 인터넷이 막힌 PC 가 많다면 사내 승인된 Python 설치 파일을 공유폴더에 같이 두고 안내하세요.</p>
   </section>
 
   <section id="update">
@@ -143,7 +143,7 @@ robocopy C:\temp\ax-navi \\파일서버\공유\ax-navi /MIR /XD .git C:\temp\ax-
     <p><code>install.cmd</code> 는 실행 창구입니다. <code>.ps1</code> 은 더블클릭하면 메모장으로 열리고 회사 PC 는 PowerShell 스크립트 실행을 막아 두는 경우가 많아, 그 한 번만 실행을 허용해 <code>install.ps1</code> 을 돌립니다. PC 의 보안 설정은 바꾸지 않습니다.</p>
     <table>
       <tr><th>단계</th><th>하는 일</th></tr>
-      <tr><td>확인</td><td>공유폴더에 <code>.claude-plugin</code> 이 있는지, <code>claude</code>·<code>node</code> 명령이 있는지 봅니다.</td></tr>
+      <tr><td>확인</td><td>공유폴더에 <code>.claude-plugin</code> 이 있는지, <code>claude</code>·<code>node</code> 명령이 있는지 봅니다. Python 3.10 이상이 없으면 경고만 하고 계속합니다.</td></tr>
       <tr><td>1. 복사</td><td><code>robocopy /MIR</code> 로 공유폴더를 <code>%LOCALAPPDATA%\ax-navi\marketplace</code> 에 맞춥니다(<code>.git</code>·드라이버 폴더 제외).</td></tr>
       <tr><td>2. 등록</td><td>그 폴더를 <code>ax-navi</code> 마켓플레이스로 등록합니다. 같은 이름이 GitHub 등 다른 곳을 가리키면 지우고 바꿉니다. 이미 등록돼 있으면 목록만 새로 읽습니다.</td></tr>
       <tr><td>3. 설치</td><td><code>ax-navi@ax-navi</code> 를 사용자 범위로 설치하거나 갱신합니다.</td></tr>

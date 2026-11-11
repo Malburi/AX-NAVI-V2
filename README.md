@@ -110,10 +110,16 @@ Claude Code 안에서 한 번만 합니다.
 | **Claude Code** | `claude plugin` 을 지원하는 최신 버전 | 플러그인 설치 · 실행 |
 | **Node.js** | 18 이상 | 결정론적 인덱서 · 견적 · 스키마 검증 (npm 의존성 없음) |
 | git | 아무 버전 | 하네스 공유 · 변경 범위 표시 |
-| Python | 3.10 이상 권장 | 하네스 조립 · 패턴 프로필 검증 · 위키 생성 |
+| **Python** | 3.10 이상 (필수) | 하네스 조립(CLAUDE.md · 스킬 · 패턴) · 검증 · 위키 생성 |
 | Oracle Instant Client | 선택 | DB 도구로 thin 접속을 거부하는 DB 에 붙을 때만(thick 모드). Oracle 드라이버 자체는 DB 도구를 처음 쓸 때 npm 으로 자동 설치됩니다 |
 
-Python 인터프리터 이름은 `python3` → `python` → `py` 순서로 찾습니다. Node 가 없으면 인덱서 대신 스택별 Python 추출기가 기본 인덱스만 만들고, Python 이 없으면 해당 단계만 WARN 으로 건너뜁니다.
+Python 인터프리터 이름은 `python3` → `python` → `py` 순서로 찾습니다. Node 가 없으면 인덱서 대신 스택별 Python 추출기가 기본 인덱스만 만듭니다. Python 이 없으면 하네스 초기화가 CLAUDE.md · 스킬 조립, 검증, 위키 생성을 WARN 으로 건너뛰어 하네스가 완성되지 않습니다.
+
+Python 설치(Windows)는 다음 순서로 합니다.
+
+1. python.org 또는 사내 배포판으로 3.10 이상을 설치하고, 첫 화면에서 **Add python.exe to PATH** 를 체크합니다.
+2. 설정 > 앱 > 고급 앱 설정 > 앱 실행 별칭에서 `python.exe` · `python3.exe` 를 끕니다(Microsoft Store 로 연결되는 가짜 실행 파일).
+3. 새 터미널에서 `python --version` 이 3.10 이상으로 나오는지 확인하고 Claude Code 를 다시 실행합니다.
 
 ### 처음 설치
 
