@@ -68,6 +68,7 @@
   <nav>
     <a href="#overview">한눈에 보기</a>
     <a href="#install">설치하기</a>
+    <a href="#python">Python 설치</a>
     <a href="#update">새 판 받기</a>
     <a href="#db">DB 도구 쓰기</a>
     <a href="#trouble">문제 해결</a>
@@ -99,7 +100,7 @@ claude plugin install ax-navi@ax-navi</code></pre>
       <tr><th>항목</th><th>확인 방법</th></tr>
       <tr><td>Claude Code</td><td>명령 창에서 <code>claude --version</code> 이 동작해야 합니다.</td></tr>
       <tr><td>Node.js 18 이상</td><td>명령 창에서 <code>node --version</code> 이 동작해야 합니다.</td></tr>
-      <tr><td>Python 3.10 이상</td><td>명령 창에서 <code>python --version</code> 이 3.10 이상으로 나와야 합니다. 하네스 초기화(CLAUDE.md·스킬 조립, 검증, 위키 생성)에 필요합니다. 없어도 설치는 되지만 <code>install.cmd</code> 가 경고를 띄웁니다.</td></tr>
+      <tr><td>Python 3.10 이상</td><td>명령 창에서 <code>python --version</code> 이 3.10 이상으로 나와야 합니다. 하네스 초기화(CLAUDE.md·스킬 조립, 검증, 위키 생성)에 필요합니다. 없어도 설치는 되지만 <code>install.cmd</code> 가 경고를 띄웁니다. 설치 방법은 <a href="#python">Python 설치</a> 를 보세요.</td></tr>
       <tr><td>공유폴더 접근</td><td>탐색기에서 관리자가 알려 준 공유폴더(예: <code>\\파일서버\공유\ax-navi</code>)가 열려야 합니다.</td></tr>
     </table>
 
@@ -120,12 +121,26 @@ claude plugin install ax-navi@ax-navi</code></pre>
 [4/4] Oracle DB 드라이버
   oracledb 6.10.0 를 복사했습니다.
 
-완료: ax-navi 0.3.12</code></pre>
+완료: ax-navi 0.3.13</code></pre>
     <ul>
       <li>설치는 사용자 범위라 모든 프로젝트에서 쓰입니다.</li>
       <li>ax-navi 만 설치·갱신합니다. 다른 플러그인은 건드리지 않습니다.</li>
       <li>실행 파일은 <code>install.cmd</code> 입니다. 옆의 <code>install.ps1</code> 은 실제 작업을 하는 스크립트라 따로 실행하지 않습니다.</li>
     </ul>
+  </section>
+
+  <section id="python">
+    <h2>Python 설치</h2>
+    <p>하네스 초기화(CLAUDE.md·스킬 조립, 검증, 위키 생성)에는 Python 3.10 이상이 필요합니다. 없으면 <code>install.cmd</code> 가 노란 경고를 띄우고, 하네스 초기화는 시작할 때 멈춥니다. 플러그인의 다른 기능(찾기·흐름 추적·DB 도구 등)은 Python 없이도 동작합니다.</p>
+    <ol>
+      <li><a href="https://www.python.org/downloads/">python.org</a> 에서 Python 3.10 이상 설치 파일을 받아 실행합니다. 첫 화면 아래의 <b>Add python.exe to PATH</b> 를 반드시 체크한 뒤 설치합니다.</li>
+      <li>설정 &gt; 앱 &gt; 고급 앱 설정 &gt; <b>앱 실행 별칭</b> 에서 <code>python.exe</code>·<code>python3.exe</code> 를 끕니다. Microsoft Store 로 연결되는 가짜 실행 파일이라, 켜 두면 설치한 Python 대신 이것이 잡힐 수 있습니다.</li>
+      <li>새 명령 창에서 확인합니다.
+<pre><code>python --version
+Python 3.12.x</code></pre>
+      3.10 이상으로 나오면 Claude Code 를 다시 열고 하네스 초기화를 요청합니다.</li>
+    </ol>
+    <div class="tip">인터넷이 막힌 PC 라면 관리자에게 Python 설치 파일을 공유폴더에 올려 달라고 요청하세요.</div>
   </section>
 
   <section id="update">
@@ -153,7 +168,7 @@ claude plugin install ax-navi@ax-navi</code></pre>
       <tr><th>창에 나온 내용</th><th>할 일</th></tr>
       <tr><td>claude 명령을 찾지 못했습니다</td><td>Claude Code 를 설치한 뒤 다시 실행합니다.</td></tr>
       <tr><td>node 명령을 찾지 못했습니다</td><td>Node.js 18 이상을 설치한 뒤 다시 실행합니다.</td></tr>
-      <tr><td>[경고] Python 을 찾지 못했습니다 / 3.10 보다 낮습니다</td><td>설치는 끝까지 진행됩니다. 하네스 초기화 전에 <a href="https://www.python.org/downloads/">python.org</a> 에서 Python 3.10 이상을 받아 설치하고, 첫 화면에서 <b>Add python.exe to PATH</b> 를 체크합니다. 설정 &gt; 앱 &gt; 고급 앱 설정 &gt; 앱 실행 별칭에서 <code>python.exe</code>·<code>python3.exe</code> 를 끈 뒤, 새 창에서 <code>python --version</code> 을 확인하고 Claude Code 를 다시 엽니다.</td></tr>
+      <tr><td>[경고] Python 을 찾지 못했습니다 / 3.10 보다 낮습니다</td><td>설치는 끝까지 진행됩니다. <a href="#python">Python 설치</a> 순서대로 하면 됩니다. 요약하면 <a href="https://www.python.org/downloads/">python.org</a> 에서 Python 3.10 이상을 받아 설치하고, 첫 화면에서 <b>Add python.exe to PATH</b> 를 체크합니다. 설정 &gt; 앱 &gt; 고급 앱 설정 &gt; 앱 실행 별칭에서 <code>python.exe</code>·<code>python3.exe</code> 를 끈 뒤, 새 창에서 <code>python --version</code> 을 확인하고 Claude Code 를 다시 엽니다.</td></tr>
       <tr><td>하네스 초기화가 "Python 3.10 이상이 필요합니다" 로 멈춤</td><td>위와 같이 Python 3.10 이상을 설치한 뒤 하네스 초기화를 다시 실행합니다.</td></tr>
       <tr><td>원본 폴더에 .claude-plugin\marketplace.json 이 없습니다</td><td>관리자에게 공유폴더 상태를 문의합니다.</td></tr>
       <tr><td>공유폴더를 복사하지 못했습니다</td><td>Claude Code 를 모두 닫고 다시 실행합니다. 계속되면 관리자에게 공유폴더 권한을 문의합니다.</td></tr>
