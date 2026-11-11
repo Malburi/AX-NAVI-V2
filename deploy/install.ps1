@@ -22,6 +22,23 @@ function Invoke-Claude([string[]] $argv) {
   return $out
 }
 
+function Find-Python {
+  # 하네스 초기화(CLAUDE.md·스킬 조립, 검증, 위키)가 Python 3.10 이상을 쓴다. 찾은 버전을, 없으면 빈 문자열을 돌려준다.
+  # Microsoft Store 연결용 가짜 python.exe 는 버전을 출력하지 않으므로 없는 것으로 처리된다.
+  $ErrorActionPreference = "Continue"
+  foreach ($cand in @(@("python3"), @("python"), @("py", "-3"))) {
+    if (-not (Get-Command $cand[0] -ErrorAction SilentlyContinue)) { continue }
+    $pyArgs = @($cand | Select-Object -Skip 1) + "--version"
+    $text = (& $cand[0] @pyArgs 2>&1 | Out-String)
+    if ($text -match "Python (\d+)\.(\d+)\.(\d+)") {
+      $found = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+      if ([int]$Matches[1] -gt 3 -or ([int]$Matches[1] -eq 3 -and [int]$Matches[2] -ge 10)) { return $found }
+      $script:PythonOld = $found
+    }
+  }
+  return ""
+}
+
 Say "AX-NAVI 플러그인 설치" "Cyan"
 Say "원본 폴더: $Source"
 
@@ -37,6 +54,15 @@ if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
 }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
   Fail "node 명령을 찾지 못했습니다. Node.js 18 이상을 먼저 설치하고 새 창에서 다시 실행하세요(플러그인 도구가 Node 로 돈다)."
+}
+
+$PythonOld = ""
+$python = Find-Python
+if ($python) {
+  Say "Python $python 확인"
+} else {
+  $why = if ($PythonOld) { "Python $PythonOld 은 3.10 보다 낮습니다" } else { "Python 을 찾지 못했습니다" }
+  Say "[경고] $why. 플러그인 설치는 계속하지만, 하네스 초기화에는 Python 3.10 이상이 필요합니다." "Yellow"
 }
 
 # 2. 공유폴더 → 이 PC 로 복사(바뀐 파일만, 원본에 없는 파일은 지운다)
@@ -103,3 +129,10 @@ Say ""
 Say "완료: ax-navi $version" "Green"
 Say "열려 있는 Claude Code 를 모두 닫고 다시 실행하세요."
 Say "DB 를 쓰려면 Claude Code 에서 /plugin configure ax-navi@ax-navi 로 접속 정보를 넣으세요."
+if (-not $python) {
+  Say ""
+  Say "[경고] 하네스 초기화 전에 Python 3.10 이상을 설치하세요." "Yellow"
+  Say "  1. python.org 또는 사내 배포판으로 설치하고, 첫 화면에서 'Add python.exe to PATH' 를 체크합니다." "Yellow"
+  Say "  2. 설정 > 앱 > 고급 앱 설정 > 앱 실행 별칭에서 python.exe, python3.exe 를 끕니다(Store 연결용 가짜 실행 파일)." "Yellow"
+  Say "  3. 새 터미널에서 python --version 이 3.10 이상으로 나오는지 확인하고 Claude Code 를 다시 실행합니다." "Yellow"
+}
