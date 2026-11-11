@@ -6,7 +6,7 @@
 
 ITO/SI/SM 현장을 위한 Claude Code 플러그인 — 코드베이스 지도를 먼저 만들고, 그 지도를 근거로 찾고 · 따라가고 · 고칩니다.
 
-[![version](https://img.shields.io/badge/version-0.3.12-0F7B85)](docs/changelog.md)
+[![version](https://img.shields.io/badge/version-0.3.13-0F7B85)](docs/changelog.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](#라이선스)
 [![node](https://img.shields.io/badge/node-%E2%89%A518-339933)](#요구-사항)
 [![platform](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-555)](#설치)
@@ -97,7 +97,7 @@ Claude Code 안에서 한 번만 합니다.
 - [지원 스택](#지원-스택)
 - [구성](#구성)
 
-현재 버전 **0.3.12**
+현재 버전 **0.3.13**
 
 ---
 
@@ -113,7 +113,7 @@ Claude Code 안에서 한 번만 합니다.
 | **Python** | 3.10 이상 (필수) | 하네스 조립(CLAUDE.md · 스킬 · 패턴) · 검증 · 위키 생성 |
 | Oracle Instant Client | 선택 | DB 도구로 thin 접속을 거부하는 DB 에 붙을 때만(thick 모드). Oracle 드라이버 자체는 DB 도구를 처음 쓸 때 npm 으로 자동 설치됩니다 |
 
-Python 인터프리터 이름은 `python3` → `python` → `py` 순서로 찾습니다. Node 가 없으면 인덱서 대신 스택별 Python 추출기가 기본 인덱스만 만듭니다. Python 이 없으면 하네스 초기화가 CLAUDE.md · 스킬 조립, 검증, 위키 생성을 WARN 으로 건너뛰어 하네스가 완성되지 않습니다.
+Python 인터프리터 이름은 `python3` → `python` → `py` 순서로 찾습니다. Node 가 없으면 인덱서 대신 스택별 Python 추출기가 기본 인덱스만 만듭니다. Python 이 없거나 3.10 미만이면 하네스 초기화는 시작할 때 멈추고 설치 방법을 안내합니다(인덱스만 갱신은 그대로 진행).
 
 Python 설치(Windows)는 다음 순서로 합니다.
 
