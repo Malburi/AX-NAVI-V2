@@ -146,7 +146,7 @@ claude plugin marketplace update ax-navi
 claude plugin update ax-navi@ax-navi
 ```
 
-적용은 새 세션에서 됩니다. 새 판에서 달라진 점은 [변경 이력](docs/changelog.md)에 있습니다.
+적용은 새 세션에서 됩니다. 새 판에서 달라진 점은 [패치노트](PATCHNOTES.md)(판마다 한 줄)와 [변경 이력](docs/changelog.md)(상세)에 있습니다.
 
 ### GitHub 에 접속되지 않는 사내망
 
