@@ -22,7 +22,7 @@ python "[plugin_root]/agents/lib/stack_precheck.py" --root "[root]"
 
 - `selected-paths`면 선택한 상대경로들을 `include_paths`에 넣는다. 인덱서가 그 밖의 소스는 읽지 않는다.
 - 모노레포면 모듈마다 `workspaces[]` 항목을 하나씩 두고 `stack`은 `00_stack_precheck.json`의 값을 쓴다.
-- **기존 `indexer-config.json`이 있으면 사용자가 넣은 키는 지우지 않고 보존한다**: `db_dump_paths`·`vendor_exclude`·`test_exclude`·`dispatch_rules`. 위 항목(`init_layout`·`include_paths`·`workspaces`)만 `00_init_scope.md` 값으로 갱신하고 나머지는 그대로 병합한다. 통째로 덮어쓰면 재초기화 때 덤프 경로 설정이 말없이 사라진다.
+- **기존 `indexer-config.json`이 있으면 사용자가 넣은 키는 지우지 않고 보존한다**: `db_dump_paths`·`vendor_exclude`·`test_exclude`·`dispatch_rules`·`screen_open_calls`. 위 항목(`init_layout`·`include_paths`·`workspaces`)만 `00_init_scope.md` 값으로 갱신하고 나머지는 그대로 병합한다. 통째로 덮어쓰면 재초기화 때 덤프 경로 설정이 말없이 사라진다.
 
 ## Step C — 인덱싱
 

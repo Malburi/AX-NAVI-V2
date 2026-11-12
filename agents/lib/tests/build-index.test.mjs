@@ -3045,4 +3045,37 @@ public class A {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  /*
+   * WinForms 실측(321만 줄): 메뉴가 `SelectMenuItem("화면ID")` 로 화면을 열어 "누가 이 화면을 여나"가 비었고,
+   * `new 팝업().ShowDialog()` 처럼 만들자마자 부르는 호출도 리시버를 몰라 버려졌다.
+   */
+  register("화면 ID 문자열로 여는 호출과 new X().m() 호출을 잇는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-screen-"));
+    try {
+      write(root, "UI/DDA10010(기자재 POR).cs", "namespace HMD.DDA10.UI { public partial class DDA10010 : BaseForm { private void Search() { } } }");
+      write(root, "UI/DZU10001.cs", [
+        "namespace HMD.DZU10.UI {",
+        "  public class DZU10001 : BaseForm {",
+        "    private void menu_Click(object s, EventArgs e) { MenuControl.SelectMenuItem(\"DDA10010\", null); }",
+        "    private void other_Click(object s, EventArgs e) { MenuControl.SelectMenuItem(\"NOPE9999\", null); }",
+        "    private void custom_Click(object s, EventArgs e) { CommonUtil.fnOpenScreen(\"user\", \"DDA10010\"); }",
+        "  }",
+        "}",
+      ].join("\n"));
+      write(root, "src/com/x/OrderService.java", "package com.x; public class OrderService { public void save() { } }");
+      write(root, "src/com/x/MainView.java", "package com.x; public class MainView { public void onOpen() { new OrderService().save(); } }");
+      write(root, "_workspace/indexer-config.json", JSON.stringify({ screen_open_calls: ["CommonUtil.fnOpenScreen"] }));
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const edges = json(root, "call_graph.json").edges;
+      const opens = edges.filter((edge) => edge.type === "screen_open");
+      assert.equal(opens.length, 2, JSON.stringify(opens));
+      assert.ok(opens.every((edge) => edge.to === "HMD.DDA10.UI.DDA10010"), "없는 화면 이름(NOPE9999)은 잇지 않는다");
+      assert.ok(opens.some((edge) => edge.from.endsWith("menu_Click") && edge.evidence === 'SelectMenuItem("DDA10010")'));
+      assert.ok(opens.some((edge) => edge.from.endsWith("custom_Click")), "설정에 더한 함수 이름도 잡는다");
+      assert.ok(edges.some((edge) => edge.from === "com.x.MainView.onOpen" && edge.to === "com.x.OrderService.save"), "new X().m() 은 X.m 으로 잇는다");
+      assert.equal(validateHarness({ root, pluginRoot: PLUGIN_ROOT }).status, "PASS", "screen_open 은 스키마의 엣지 종류에 있다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 }

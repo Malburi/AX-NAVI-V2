@@ -31,6 +31,7 @@
 | `vendor_exclude` | 불리언 | 켜짐 | `false`를 두면 벤더·미니파이 소스 제외를 전부 끔 |
 | `test_exclude` | 불리언 | 켜짐 | `false`를 두면 테스트 디렉터리·테스트 파일명 제외를 끔 |
 | `db_dump_paths[]` | 배열 | `[]` | DB 덤프(DDL·패키지·프로시저 소스)가 든 폴더의 상대경로. 이 폴더는 `include_paths`·벤더·테스트 제외와 무관하게 읽고, 파일당 크기 상한이 4MB에서 32MB로 넓어짐. 루트 밖·절대경로는 버림 |
+| `screen_open_calls[]` | 배열 | `[]` | 화면 ID 문자열로 화면을 여는 사내 공통 함수 이름. 기본 목록(`SelectMenuItem`·`MoveTo`·`OpenMenu`·`OpenForm`·`OpenScreen`·`OpenPopup`·`ShowForm`·`ShowPopup`·`gfn_openPopup`·`gfn_openMenu`·`gfn_movePage`, Android `new Intent(…, X.class)`)에 더한다. `CommonUtil.fnOpenScreen`처럼 적어도 마지막 이름만 본다. 문자열 인자가 실제 클래스(없으면 파일) 이름과 맞을 때만 `screen_open` 엣지가 된다 |
 | `depth_gate` | 객체 | 아래 기본값 | 분석 리포트 깊이 게이트(`report-depth.mjs`)의 조정. 아래 "분석 깊이 게이트" 참조 |
 
 ### 분석 깊이 게이트
@@ -77,7 +78,7 @@ FAIL 이면 심층 패스(영역별 분석)를 처방한다. 영역 수는 파�
 - **데이터 행은 넣지 않는다.** 구조와 소스만 읽는다. 개인정보가 든 INSERT 덤프는 제외한다.
 - **확장자.** `.sql`·`.ddl`(DDL), `.pks`·`.pkb`·`.pck`·`.spc`·`.bdy`·`.prc`·`.fnc`·`.trg`·`.pls`(PL/SQL). 이 중 `.ddl`과 PL/SQL 전용 확장자는 **`db_dump_paths` 없이도** 벤더·테스트 제외와 4MB 상한에서 풀려 읽힌다. `.sql`은 마이그레이션·테스트 스크립트일 수도 있어, 제외 폴더나 큰 파일은 `db_dump_paths`로 지정할 때만 풀린다.
 - **무엇이 읽혔나.** 인덱싱 결과 `_meta.json`의 `db_source`에 읽은 객체 수(테이블·뷰·패키지·프로시저·함수·트리거)와 `undefined_procedures`(자바·XML이 부르는데 소스가 없는 프로시저, 호출 많은 순)가 남는다. harness-init은 이를 견적 화면과 최종 보고에 보여 주고, 어떤 프로시저 소스를 내보내야 하는지 알려 준다.
-- **하네스 재초기화.** `indexer-config.json`의 `db_dump_paths`·`vendor_exclude`·`test_exclude`·`dispatch_rules`는 보존된다. 덤프를 추가한 뒤에는 `--mode init`이 아니라 `incremental`("인덱스만 갱신해줘")로 반영한다.
+- **하네스 재초기화.** `indexer-config.json`의 `db_dump_paths`·`vendor_exclude`·`test_exclude`·`dispatch_rules`·`screen_open_calls`는 보존된다. 덤프를 추가한 뒤에는 `--mode init`이 아니라 `incremental`("인덱스만 갱신해줘")로 반영한다.
 
 ### 지원하는 DB 방언
 

@@ -39,7 +39,7 @@ import { extractNexacro } from "./adapters/nexacro.mjs";
 import { extractDispatchCalls, extractResultKeys, inferDispatchRules, resolveCall, selectColumns } from "./index/dispatch.mjs";
 import { detectSqlDialect, unwrapMysqlConditionalComments } from "./index/sql_dialect.mjs";
 
-export const INDEXER_VERSION = "2.1.0"; // 2.0.0: 문자열 디스패치(worker·action → 빈 메서드)와 결과를 위치로 읽는 화면을 잇고, SELECT 컬럼 순서를 남긴다. 2.1.0: DB 덤프(DDL·프로시저·트리거)를 schema.json 에 담고 Oracle·MSSQL·MySQL·PostgreSQL 방언을 구분한다 — 기존 인덱스는 stale 로 판정되어 재생성된다.
+export const INDEXER_VERSION = "2.2.0"; // 2.0.0: 문자열 디스패치(worker·action → 빈 메서드)와 결과를 위치로 읽는 화면을 잇고, SELECT 컬럼 순서를 남긴다. 2.1.0: DB 덤프(DDL·프로시저·트리거)를 schema.json 에 담고 Oracle·MSSQL·MySQL·PostgreSQL 방언을 구분한다. 2.2.0: 화면 ID 문자열로 여는 호출(screen_open)과 `new X().m()` 을 잇는다 — 기존 인덱스는 stale 로 판정되어 재생성된다.
 
 /* AI edge patch에서 허용하는 관계 종류. analyzer는 노드를 새로 만들 수 없고 기존 노드 사이의 관계만 보강한다. */
 const AI_PATCH_EDGE_TYPES = new Set(["call", "inject", "inherit", "reflect", "dispatch"]);
@@ -497,6 +497,13 @@ function loadConfig(root, configArg) {
      * 대부분 추론하지만(inferDispatchRules), 추론이 못 하는 프로젝트를 위해 직접 적을 수 있게 둔다.
      * 예: [{ "endpoint": "/TransData.do", "bean_param": "worker", "method_param": "action", "method_template": "do{Action}" }]
      */
+    /*
+     * 화면 ID 문자열로 화면을 여는 사내 공통 함수 이름(기본 목록에 더한다). 예: ["fnOpenScreen", "CommonUtil.OpenMenuForm"]
+     * 문자열 인자가 실제 클래스·파일 이름과 맞을 때만 `screen_open` 엣지가 된다.
+     */
+    screen_open_calls: Array.isArray(config.screen_open_calls)
+      ? config.screen_open_calls.map((item) => String(item).trim().split(".").at(-1)).filter((item) => /^[A-Za-z_$][\w$]*$/.test(item))
+      : [],
     dispatch_rules: Array.isArray(config.dispatch_rules)
       ? config.dispatch_rules
         .filter((item) => item && item.endpoint && item.bean_param && item.method_param)
@@ -1540,6 +1547,17 @@ function extractSymbols(text, clean, rel, workspace) {
       if (!match[2] && precededByDot(body, match.index)) continue;
       callSites.push({ caller: method.id, name, qualifier: match[2] ? match[1] : "", file: rel, line: atLine(method.start + match.index), workspace: workspace.id });
     }
+    /*
+     * `new OrderService().save()` · `new Popup(arg).ShowDialog()` — 만들자마자 부르는 호출. 위 규칙은 `)` 뒤의 `.save(` 를
+     * 리시버를 모르는 호출로 보고 건너뛰는데, 여기서는 리시버 타입이 바로 앞의 `new` 로 확정된다. 클래스 이름을 한정자로
+     * 넘기면 정적 호출과 같은 경로(`Pager.calBetweenRow`)로 정확히 그 클래스의 메서드에 잇는다.
+     */
+    for (const match of body.matchAll(/\bnew\s+([A-Za-z_$][\w$.]*)\s*\(([^()]|\([^()]*\))*\)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g)) {
+      const owner = String(match[1]).split(".").at(-1);
+      const name = /** @type {string} */ (match[3]);
+      if (CALL_KEYWORDS.has(name)) continue;
+      callSites.push({ caller: method.id, name, qualifier: owner, file: rel, line: atLine(method.start + match.index), workspace: workspace.id });
+    }
   }
   const injects = [];
   const injectRegex = /(?:@Autowired|@Inject|@Resource(?:\([^)]*\))?)\s*(?:private|protected|public|lateinit\s+var|val|var)?\s*([A-Z][\w.]*)\s+(\w+)/gm;
@@ -1816,6 +1834,39 @@ function nextMethod(methods, line) {
  * 찾아야 data_flow가 endpoint→method→SQL 체인을 연결할 수 있다(2026-08-27 추가). 애노테이션
  * (@Query 등)은 메서드 선언 위에 붙어 본문 밖이라 여기 해당하지 않고 nextMethod를 쓴다.
  */
+/*
+ * 화면 ID 문자열로 화면을 여는 호출 — `MenuControl.SelectMenuItem("DDA10010", dt)` · `gfn_openPopup("p", "frm::X.xfdl")`.
+ * 실측(WinForms 321만 줄): 메뉴 이동이 전부 이 모양이라 "누가 이 화면을 여나"에 코드 호출자가 거의 없었다.
+ * 함수 이름은 사이트마다 달라 기본 목록에 `indexer-config.json` 의 `screen_open_calls` 를 더한다. 인자 위치도 제각각이라
+ * 문자열 인자를 모두 후보로 넘기고, 실제로 그 이름의 클래스(또는 파일)가 있을 때만 잇는다(aggregate) — 없는 이름은 버린다.
+ */
+const DEFAULT_SCREEN_OPEN_CALLS = ["SelectMenuItem", "MoveTo", "OpenMenu", "OpenForm", "OpenScreen", "OpenPopup", "ShowForm", "ShowPopup", "gfn_openPopup", "gfn_openMenu", "gfn_movePage"];
+function extractScreenOpens(clean, rel, methods, extraCalls = []) {
+  if (!methods.length) return [];
+  const names = [...new Set([...DEFAULT_SCREEN_OPEN_CALLS, ...extraCalls])].map((name) => name.replace(/[$.*+?^{}()|[\]\\]/g, "\\$&"));
+  const atLine = lineIndex(clean);
+  const found = [];
+  for (const match of clean.matchAll(new RegExp(`\\b(${names.join("|")})\\s*\\(`, "g"))) {
+    const open = (match.index ?? 0) + match[0].length - 1;
+    const close = matchingParen(clean, open);
+    if (close < 0) continue;
+    const targets = [...clean.slice(open + 1, close).matchAll(/(["'])((?:(?!\1)[^\\\n]|\\.){2,200})\1/g)].map((item) => /** @type {string} */ (item[2])).slice(0, 4);
+    const method = enclosingMethod(methods, match.index ?? 0);
+    if (method && targets.length) found.push({ caller: method.id, call: match[1], targets, file: rel, line: atLine(match.index ?? 0) });
+  }
+  /* Android — `new Intent(this, DetailActivity.class)` */
+  for (const match of clean.matchAll(/\bnew\s+Intent\s*\([^;]*?\b([A-Z]\w*)\s*\.\s*class\b/g)) {
+    const method = enclosingMethod(methods, match.index ?? 0);
+    if (method) found.push({ caller: method.id, call: "Intent", targets: [/** @type {string} */ (match[1])], file: rel, line: atLine(match.index ?? 0) });
+  }
+  return found;
+}
+
+/* 화면 이름 후보 → 클래스 이름. `frm::sub/DDA10010.xfdl` · `DDA10010.cs` 처럼 경로·확장자가 붙어 와도 마지막 이름만 본다. */
+function screenName(target) {
+  return String(target).split(/[:/\\]/).filter(Boolean).at(-1)?.replace(/\.[A-Za-z]+$/, "") || "";
+}
+
 function enclosingMethod(methods, offset) {
   let best = null;
   for (const m of methods) {
@@ -3298,6 +3349,8 @@ function analyzeFile(file, root, config) {
     messageLabels: extractMessageLabels(text, file.rel),
     /* 화면의 문자열 디스패치 호출과 그 콜백이 결과를 읽는 자리(index/dispatch.mjs). */
     dispatchCalls: DISPATCH_CALL_EXT.has(ext) ? extractDispatchCalls(clean, file.rel, symbolFacts.methods) : [],
+    /* 화면 ID 문자열로 화면을 여는 호출(`SelectMenuItem("DDA10010")`). 이어 주는 것은 aggregate 다. */
+    screenOpens: extractScreenOpens(clean, file.rel, symbolFacts.methods, config.screen_open_calls),
     /* 서버 메서드가 쿼리 결과를 내보내는 이름(`dataSet.set("rtInfo", …)`). */
     resultKeys: RESULT_KEY_EXT.has(ext) ? extractResultKeys(clean, symbolFacts.methods) : [],
   };
@@ -4245,6 +4298,28 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
    * 예전에는 _meta.edge_count만 중복 포함 배열 길이로 기록돼 실제 edges 배열과 어긋났고
    * (validator_checks가 count 불일치로 FAIL), in-degree도 같은 관계를 여러 번 세고 있었다.
    */
+  /*
+   * 화면 열기 — 문자열 인자 중 실제 그 이름의 클래스(없으면 그 이름의 파일)가 있는 것만 잇는다. 같은 이름이 여럿이면 모두 잇되
+   * 신뢰도를 낮춘다. 메뉴 ID 와 화면의 대응이 DB 메뉴 테이블에만 있는 시스템은 여기서 잡히지 않는다.
+   */
+  const screenClassNodes = nodes.filter((node) => !["method", "function", "trigger"].includes(node.type) && node.source !== "external");
+  const screenByName = new Map();
+  for (const node of screenClassNodes) pushTo(screenByName, node.id.split(".").at(-1), node);
+  const screenByFile = new Map();
+  for (const node of screenClassNodes) if (node.file) pushTo(screenByFile, basename(node.file).replace(/\.[^.]+$/, ""), node);
+  for (const open of facts.flatMap((item) => item.screenOpens || [])) {
+    for (const target of open.targets) {
+      const name = screenName(target);
+      if (!name) continue;
+      const hits = screenByName.get(name) || screenByFile.get(name) || [];
+      if (!hits.length) continue;
+      for (const hit of hits.slice(0, 3)) {
+        if (hit.id === open.caller || open.caller.startsWith(`${hit.id}.`)) continue;
+        edges.push({ from: open.caller, to: hit.id, type: "screen_open", file: open.file, line: open.line, workspace: workspaceFor(open.file, config).id, origin: "deterministic-indexer", confidence: hits.length === 1 ? "HIGH" : "MEDIUM", evidence: `${open.call}("${target}")` });
+      }
+      break;
+    }
+  }
   const dispatch = linkDispatch(facts, options, config, springBeanByName, nodeByOwnerId, nodes, edges);
   const uniqueEdges = unique(edges, (item) => `${item.from}:${item.to}:${item.type}`);
   /* 짝 저장소 함수는 실제로 이어진 것만 노드로 남긴다(전부 넣으면 짝 저장소 함수 수천 개가 여기 그래프를 채운다). */
