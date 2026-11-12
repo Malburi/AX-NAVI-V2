@@ -3078,4 +3078,33 @@ public class A {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  /*
+   * 함수 이름 목록에 없는 사내 함수(`fnGoScreen`)로 여는 화면. 인자 문자열이 **화면 클래스** 이름과 같을 때만 추정 연결한다.
+   * 화면 판정: 상속을 따라 UI 기본 클래스(JFrame 등)에 닿거나, WinForms 디자이너 파일이 있거나, 디자이너 파일이 있는 형제가 2개 이상인
+   * 외부 부모(BaseForm, DLL 에만 있음)를 상속한다. partial 클래스는 Designer.cs 쪽에 부모가 없어도 같은 id 로 합친다.
+   */
+  register("화면 클래스를 판정해 목록에 없는 함수로 여는 호출도 추정해 잇는다", () => {
+    const root = mkdtempSync(join(tmpdir(), "ax-indexer-screen-infer-"));
+    try {
+      write(root, "UI/A10(메인).cs", "namespace ui { public partial class A10 : BaseForm { void x() { } } }");
+      write(root, "UI/A10(메인).Designer.cs", "namespace ui { partial class A10 { private void InitializeComponent() { } } }");
+      write(root, "UI/A10P01.cs", "namespace ui { public partial class A10P01 : BaseForm { void y() { } } }");
+      write(root, "UI/A10P01.Designer.cs", "namespace ui { partial class A10P01 { private void InitializeComponent() { } } }");
+      write(root, "UI/A10P02.cs", "namespace ui { public class A10P02 : BaseForm { void z() { } } }");
+      write(root, "UI/Menu.cs", "namespace ui { public class Menu : BaseForm { void go(object s) { CommonNav.fnGoScreen(this, \"A10P02\"); } void log() { Log.Write(\"OrderBiz\", 1); } } }");
+      write(root, "Biz/OrderBiz.cs", "namespace biz { public class OrderBiz { public void Run() { } } }");
+      write(root, "src/app/LoginView.java", "package app; public class LoginView extends JFrame { public void init() { } }");
+      write(root, "src/app/Start.java", "package app; public class Start { public void main() { Navigator.go(\"LoginView\"); } }");
+      buildIndex({ root, mode: "init", tier: "Standard", config: null });
+      const graph = json(root, "call_graph.json");
+      const opens = graph.edges.filter((edge) => edge.type === "screen_open");
+      assert.ok(opens.some((edge) => edge.to === "ui.A10P02" && edge.confidence === "MEDIUM" && edge.evidence === '추정 fnGoScreen("A10P02")'), JSON.stringify(opens));
+      assert.ok(opens.some((edge) => edge.to === "app.LoginView" && edge.evidence.startsWith("추정 go(")), "JFrame 을 상속한 Java 화면");
+      assert.ok(!opens.some((edge) => edge.to.endsWith("OrderBiz")), "화면이 아닌 클래스 이름과 같은 문자열은 잇지 않는다");
+      assert.equal(graph._meta.screen_open.screen_classes, 5, "A10 · A10P01(디자이너) · A10P02 · Menu(형제 규칙) · LoginView(JFrame)");
+      assert.ok(graph._meta.screen_open.inferred_open_calls.some((item) => item.call === "fnGoScreen"), "사이트의 화면 열기 함수 후보를 센다");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 }

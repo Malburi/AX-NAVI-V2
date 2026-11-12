@@ -31,7 +31,7 @@
 | `vendor_exclude` | 불리언 | 켜짐 | `false`를 두면 벤더·미니파이 소스 제외를 전부 끔 |
 | `test_exclude` | 불리언 | 켜짐 | `false`를 두면 테스트 디렉터리·테스트 파일명 제외를 끔 |
 | `db_dump_paths[]` | 배열 | `[]` | DB 덤프(DDL·패키지·프로시저 소스)가 든 폴더의 상대경로. 이 폴더는 `include_paths`·벤더·테스트 제외와 무관하게 읽고, 파일당 크기 상한이 4MB에서 32MB로 넓어짐. 루트 밖·절대경로는 버림 |
-| `screen_open_calls[]` | 배열 | `[]` | 화면 ID 문자열로 화면을 여는 사내 공통 함수 이름. 기본 목록(`SelectMenuItem`·`MoveTo`·`OpenMenu`·`OpenForm`·`OpenScreen`·`OpenPopup`·`ShowForm`·`ShowPopup`·`gfn_openPopup`·`gfn_openMenu`·`gfn_movePage`, Android `new Intent(…, X.class)`)에 더한다. `CommonUtil.fnOpenScreen`처럼 적어도 마지막 이름만 본다. 문자열 인자가 실제 클래스(없으면 파일) 이름과 맞을 때만 `screen_open` 엣지가 된다 |
+| `screen_open_calls[]` | 배열 | `[]` | 화면 ID 문자열로 화면을 여는 사내 공통 함수 이름. 기본 목록(`SelectMenuItem`·`MoveTo`·`OpenMenu`·`OpenForm`·`OpenScreen`·`OpenPopup`·`ShowForm`·`ShowPopup`·`gfn_openPopup`·`gfn_openMenu`·`gfn_movePage`, Android `new Intent(…, X.class)`)에 더한다. `CommonUtil.fnOpenScreen`처럼 적어도 마지막 이름만 본다. 문자열 인자가 실제 클래스(없으면 파일) 이름과 맞을 때만 `screen_open` 엣지가 된다. 목록에 없는 함수도 인자 문자열이 **화면 클래스** 이름과 정확히 같으면 추정 연결(신뢰도 MEDIUM, `evidence`가 `추정 `으로 시작)하고, 그렇게 쓰인 함수 이름을 `call_graph.json`의 `_meta.screen_open.inferred_open_calls`에 센다 — 확인되면 이 키로 올려 확정한다. 화면 클래스 판정은 상속이 UI 기본 클래스(Form·Window·JFrame·Activity 등)에 닿거나, WinForms 디자이너 파일(`*.Designer.cs`)이 있거나, 디자이너 파일이 있는 형제가 2개 이상인 부모(DLL 에만 있는 `BaseForm` 등)를 상속한 경우다 |
 | `depth_gate` | 객체 | 아래 기본값 | 분석 리포트 깊이 게이트(`report-depth.mjs`)의 조정. 아래 "분석 깊이 게이트" 참조 |
 
 ### 분석 깊이 게이트

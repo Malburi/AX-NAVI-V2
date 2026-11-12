@@ -80,7 +80,7 @@
 | `import` | 파일·모듈 import. 인덱서는 만들지 않음 | Vue 추출기 등 파일 단위 생성기 |
 | `reflect` | 리플렉션 가능성(신뢰도 낮음) | analyzer 패치만 |
 | `ui_event`·`markup_event`·`scheduler`·`process_entry` | 진입점 → 핸들러. 출발점은 `trigger:<파일>#<트리거>` 합성 노드 | 인덱서 |
-| `screen_open` | 화면 ID 문자열로 화면을 여는 호출 → 그 이름의 클래스(없으면 파일). `evidence`에 원래 호출. 함수 이름은 `screen_open_calls`로 추가 | 인덱서 |
+| `screen_open` | 화면 ID 문자열로 화면을 여는 호출 → 그 이름의 클래스(없으면 파일). `evidence`에 원래 호출. 함수 이름은 `screen_open_calls`로 추가. 목록에 없는 함수는 인자가 화면 클래스 이름과 같을 때 추정 연결(MEDIUM, `evidence`가 `추정 `으로 시작) | 인덱서 |
 | `dispatch` | 문자열 디스패치(`worker=`/`action=`)로 해소된 화면 → 서버 메서드. 함수 밖 호출은 `dispatch:<파일>:<줄>` 합성 id(노드 미생성, 알려진 한계) | 인덱서 |
 
 ## 스키마 검증

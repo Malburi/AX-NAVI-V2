@@ -1867,6 +1867,89 @@ function screenName(target) {
   return String(target).split(/[:/\\]/).filter(Boolean).at(-1)?.replace(/\.[A-Za-z]+$/, "") || "";
 }
 
+/*
+ * 함수 이름 목록에 없는 사내 함수로 화면을 여는 호출을 잡기 위한 재료 — 호출 인자로 들어간 식별자 모양 문자열과 그 함수 이름.
+ * `fnGoScreen("DDA10010")` · `Nav.Open(user, "DDA10010")` 모두 남긴다. 화면 클래스 이름과 정확히 같은 것만 aggregate 가 잇는다.
+ */
+function extractCallLiterals(clean, rel, methods) {
+  if (!methods.length) return [];
+  const atLine = lineIndex(clean);
+  const found = [];
+  for (const lit of clean.matchAll(/(["'])([A-Za-z_][A-Za-z0-9_]{4,63})\1/g)) {
+    const at = lit.index ?? 0;
+    /* 바로 앞(공백 제외)이 `(` 또는 `,` 인 인자만 — 대입·비교·사전 키는 화면 열기가 아니다. */
+    let i = at - 1;
+    while (i >= 0 && /\s/.test(clean[i])) i -= 1;
+    if (clean[i] !== "(" && clean[i] !== ",") continue;
+    /* 감싸는 `(` 를 찾아 그 앞의 함수 이름을 얻는다(300자 안). */
+    let depth = 0;
+    let open = -1;
+    for (let j = i; j >= Math.max(0, at - 300); j -= 1) {
+      const c = clean[j];
+      if (c === ")") depth += 1;
+      else if (c === "(") { if (depth === 0) { open = j; break; } depth -= 1; }
+    }
+    if (open < 0) continue;
+    const call = /([A-Za-z_$][\w$]*)\s*$/.exec(clean.slice(Math.max(0, open - 80), open))?.[1];
+    if (!call || CALL_KEYWORDS.has(call)) continue;
+    const method = enclosingMethod(methods, at);
+    if (method) found.push({ caller: method.id, call, literal: /** @type {string} */ (lit[2]), file: rel, line: atLine(at) });
+  }
+  return found;
+}
+
+/*
+ * 화면 클래스 판정. 팝업과 메인 화면은 둘 다 같은 UI 기본 클래스를 상속하므로 구분하지 않는다.
+ * 1) 상속을 따라 올라가 UI 프레임워크 기본 클래스(Form · Window · JFrame · Activity …)에 닿으면 화면이다.
+ * 2) 사내 공통 부모(`BaseForm`)가 DLL 에만 있어 끝까지 못 올라가면 보조 근거를 본다 — WinForms 디자이너 파일(`*.Designer.cs`)에
+ *    같은 클래스가 있으면 화면이고, 그 부모를 상속한 클래스 중 2개 이상이 디자이너 파일로 화면이면 그 부모는 화면 부모라 자식 모두를 화면으로 본다
+ *    (디자이너 파일이 없는 화면 · 코드로만 만든 팝업까지).
+ * 근거가 없으면 화면으로 보지 않는다 — 놓칠 수는 있어도 서비스 · 유틸 클래스를 화면으로 잡지는 않는다.
+ */
+const UI_BASE_CLASSES = new Set([
+  "Form", "UserControl", "XtraForm", "XtraUserControl", "RibbonForm", "Window", "Page",
+  "JFrame", "JDialog", "JPanel", "JInternalFrame", "Activity", "AppCompatActivity", "FragmentActivity", "ComponentActivity", "Fragment",
+]);
+function screenClassIds(facts) {
+  const bare = (name) => String(name || "").replace(/<.*$/, "").split(".").at(-1)?.trim() || "";
+  /* partial 클래스는 파일마다 심볼이 따로 나온다(`X.cs` 에 부모, `X.Designer.cs` 엔 부모 없음) — 같은 id 의 부모를 합친다. */
+  const merged = new Map();
+  for (const fact of facts) for (const item of fact.symbols || []) {
+    if (item.type !== "class") continue;
+    const seen = merged.get(item.id);
+    const bases = [item.extends, ...(item.implements || [])].filter(Boolean);
+    if (seen) seen.bases.push(...bases);
+    else merged.set(item.id, { id: item.id, bases });
+  }
+  const classes = [...merged.values()];
+  const bySimple = new Map();
+  for (const item of classes) { const key = item.id.split(".").at(-1); const list = bySimple.get(key); if (list) list.push(item); else bySimple.set(key, [item]); }
+  const basesOf = (item) => [...new Set(item.bases.map(bare).filter(Boolean))];
+  const designer = new Set();
+  for (const fact of facts) if (/\.designer\.(?:cs|vb)$/i.test(fact.rel)) for (const item of fact.symbols || []) if (item.type === "class") designer.add(item.id);
+  const memo = new Map();
+  const isScreen = (item, depth) => {
+    if (memo.has(item.id)) return memo.get(item.id);
+    memo.set(item.id, false);
+    const result = designer.has(item.id) || basesOf(item).some((base) => UI_BASE_CLASSES.has(base)
+      || (depth < 8 && (bySimple.get(base) || []).some((parent) => parent.id !== item.id && isScreen(parent, depth + 1))));
+    memo.set(item.id, result);
+    return result;
+  };
+  const screens = new Set(classes.filter((item) => isScreen(item, 0)).map((item) => item.id));
+  const childrenOfOutside = new Map();
+  for (const item of classes) for (const base of basesOf(item)) {
+    if (bySimple.has(base) || UI_BASE_CLASSES.has(base)) continue;
+    const list = childrenOfOutside.get(base);
+    if (list) list.push(item); else childrenOfOutside.set(base, [item]);
+  }
+  for (const list of childrenOfOutside.values()) {
+    const yes = list.filter((item) => screens.has(item.id)).length;
+    if (yes >= 2) for (const item of list) screens.add(item.id);
+  }
+  return screens;
+}
+
 function enclosingMethod(methods, offset) {
   let best = null;
   for (const m of methods) {
@@ -3351,6 +3434,8 @@ function analyzeFile(file, root, config) {
     dispatchCalls: DISPATCH_CALL_EXT.has(ext) ? extractDispatchCalls(clean, file.rel, symbolFacts.methods) : [],
     /* 화면 ID 문자열로 화면을 여는 호출(`SelectMenuItem("DDA10010")`). 이어 주는 것은 aggregate 다. */
     screenOpens: extractScreenOpens(clean, file.rel, symbolFacts.methods, config.screen_open_calls),
+    /* 목록에 없는 함수로 여는 호출을 추정하기 위한 인자 문자열(화면 클래스 이름과 맞는 것만 쓰인다). */
+    callLiterals: extractCallLiterals(clean, file.rel, symbolFacts.methods),
     /* 서버 메서드가 쿼리 결과를 내보내는 이름(`dataSet.set("rtInfo", …)`). */
     resultKeys: RESULT_KEY_EXT.has(ext) ? extractResultKeys(clean, symbolFacts.methods) : [],
   };
@@ -4320,6 +4405,29 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
       break;
     }
   }
+  /*
+   * 추정 화면 열기 — 함수 이름 목록에 없어도, 인자 문자열이 **화면 클래스**(screenClassIds) 이름과 정확히 같으면 잇는다.
+   * 신뢰도는 MEDIUM, evidence 는 `추정 ` 으로 시작한다. 어떤 함수가 이렇게 쓰였는지 세어 _meta 에 남긴다 — 그 사이트의 화면 열기
+   * 공통 함수가 드러나고, 확인되면 screen_open_calls 로 올려 확정할 수 있다.
+   */
+  const screenIds = screenClassIds(facts);
+  const screenById = new Map();
+  for (const node of screenClassNodes) if (screenIds.has(node.id)) pushTo(screenById, node.id.split(".").at(-1), node);
+  const inferredCalls = new Map();
+  const listedCalls = new Set([...DEFAULT_SCREEN_OPEN_CALLS, ...(config.screen_open_calls || [])]);
+  for (const item of facts.flatMap((fact) => fact.callLiterals || [])) {
+    if (listedCalls.has(item.call)) continue;
+    const hits = screenById.get(item.literal);
+    if (!hits || hits.length > 3) continue;
+    let linked = false;
+    for (const hit of hits) {
+      if (hit.id === item.caller || item.caller.startsWith(`${hit.id}.`)) continue;
+      edges.push({ from: item.caller, to: hit.id, type: "screen_open", file: item.file, line: item.line, workspace: workspaceFor(item.file, config).id, origin: "deterministic-indexer", confidence: "MEDIUM", evidence: `추정 ${item.call}("${item.literal}")` });
+      linked = true;
+    }
+    if (linked) inferredCalls.set(item.call, (inferredCalls.get(item.call) || 0) + 1);
+  }
+  const screenOpenMeta = { screen_classes: screenIds.size, inferred_open_calls: [...inferredCalls].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([call, count]) => ({ call, count })) };
   const dispatch = linkDispatch(facts, options, config, springBeanByName, nodeByOwnerId, nodes, edges);
   const uniqueEdges = unique(edges, (item) => `${item.from}:${item.to}:${item.type}`);
   /* 짝 저장소 함수는 실제로 이어진 것만 노드로 남긴다(전부 넣으면 짝 저장소 함수 수천 개가 여기 그래프를 채운다). */
@@ -4377,7 +4485,7 @@ function aggregate(facts, options, config, generatedAt, sourceFileCount, latestM
   };
   const output = {
     symbols: { _meta: { ...common, node_count: symbols.length }, symbols },
-    call_graph: { _meta: { ...common, node_count: nodes.length, edge_count: uniqueEdges.length }, nodes, edges: uniqueEdges },
+    call_graph: { _meta: { ...common, node_count: nodes.length, edge_count: uniqueEdges.length, screen_open: screenOpenMeta }, nodes, edges: uniqueEdges },
   };
   if (sqls.length || usages.length) output.sql_usage = { _meta: common, sqls, usages };
   const glossary = [...facts.flatMap((item) => item.terms || []), ...messageRefTerms(facts)];

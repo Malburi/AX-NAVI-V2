@@ -132,7 +132,7 @@ FROM/JOIN 절의 `ROWNUM`·`DUAL`·`SYSDATE`·`LEVEL` 같은 의사테이블은 
 - `import` — 파일/모듈 간 import 관계. 결정론적 인덱서는 **이 타입을 만들지 않는다**(파일 노드가 없는 순수 심볼 그래프라 `to`가 노드가 아니게 된다). Vue 추출기 등 파일 단위 관계를 내는 생성기만 쓴다
 - `reflect` — 리플렉션 가능성 (heuristic, 신뢰도 낮음). 인덱서는 만들지 않고 analyzer가 `_ai_patch.json`으로만 추가한다
 - `ui_event` · `markup_event` · `scheduler` · `process_entry` — 진입점에서 핸들러로 가는 관계. 출발점은 `trigger:<파일>#<트리거>` 형태의 합성 노드다
-- `screen_open` — 화면 ID 문자열로 화면을 여는 호출(`SelectMenuItem("DDA10010")`·`gfn_openPopup(…, "frm::X.xfdl")`·`new Intent(…, X.class)`)에서 그 이름의 클래스(없으면 파일)로 가는 관계. `evidence`에 원래 호출이 남는다. 함수 이름은 `indexer-config.json`의 `screen_open_calls`로 더한다. 메뉴 ID와 화면의 대응이 DB 메뉴 테이블에만 있는 시스템은 잡지 못한다
+- `screen_open` — 화면 ID 문자열로 화면을 여는 호출(`SelectMenuItem("DDA10010")`·`gfn_openPopup(…, "frm::X.xfdl")`·`new Intent(…, X.class)`)에서 그 이름의 클래스(없으면 파일)로 가는 관계. `evidence`에 원래 호출이 남는다. 함수 이름은 `indexer-config.json`의 `screen_open_calls`로 더한다. 목록에 없는 함수라도 인자 문자열이 화면 클래스(UI 기본 클래스 상속 · 디자이너 파일 · 같은 부모의 형제 근거) 이름과 같으면 `confidence: MEDIUM`, `evidence: "추정 …"`으로 잇고, 함수별 건수를 `_meta.screen_open`(`screen_classes`, `inferred_open_calls`)에 남긴다. 메뉴 ID와 화면의 대응이 DB 메뉴 테이블에만 있는 시스템은 잡지 못한다
 - `dispatch` — 문자열 디스패치(`worker=`/`action=` 같은 파라미터로 서버 메서드를 고르는 호출)에서 해소된 화면 → 서버 메서드 관계. 출발점이 함수 밖 호출이면 `dispatch:<파일>:<줄>` 합성 id를 쓰며, 이 id는 현재 노드로 생성되지 않는다(알려진 한계)
 
 모든 레코드에는 `origin`(`deterministic-indexer` | `ai-enrichment` | `analyzer`)과 `confidence`(`HIGH`/`MEDIUM`/`LOW`)가 붙는다 — 어디서 온 사실인지 구분하기 위한 것이다.
