@@ -21,10 +21,12 @@ v2 에서 바뀐 것: 실제 레거시(백엔드 + 화면 저장소)에서 화�
 
 프롬프트에 `<사전 영향도>` 블록이 있으면 그것이 이 질의의 결과다(AX-NAVI CLI 가 넣는다). 없으면:
 
-- `QueryIndex` 도구: `impact`(sql=<SQL id>, column=<컬럼>) 또는 `impact`(id=<메서드>)
+- `QueryIndex` 도구: `impact`(sql=<SQL id>, column=<컬럼>) 또는 `impact`(id=<메서드 또는 클래스>)
 - 셸: `node "${CLAUDE_PLUGIN_ROOT}/agents/lib/query-index.mjs" impact --sql <SQL id> [--column <컬럼>] --root "[루트]"` (스크립트 경로는 이미 절대경로로 바뀌어 있다 — 디스크를 검색하지 않는다)
 
-대상이 SQL · 컬럼이 아니면 정규화한다: 파일 → `symbol --file`, DB 컬럼 → `table --table` · `column --name`(그리드 열 화면), 엔드포인트 → `endpoint --path`.
+대상이 SQL · 컬럼이 아니면 정규화한다: 화면 · 클래스 → `impact --id <클래스 이름>`(클래스의 메서드 전부와 `new X()` · 화면 열기를 출발점으로 삼고, 클래스 안의 호출은 뺀다), 파일 → `symbol --name <파일명의 클래스 이름>`, DB 컬럼 → `table --table` · `column --name`(그리드 열 화면), 엔드포인트 → `endpoint --path`.
+
+**0건이면 인덱스 탓으로 결론 내지 않는다.** 실측: `symbol --file "DDA10010.cs"` 가 0건이라 "한글 파일명이라 인덱서가 등록하지 못했다"고 썼는데, 실제 파일은 `DDA10010(기자재 POR).cs` 였고 `symbol --name DDA10010` 은 정상이었다. 0건이면 ① `symbol --name <짧은 이름>` ② 확장자를 뺀 `symbol --file <이름 일부>` ③ `search --q <이름>` 을 차례로 해 보고, 그래도 없을 때만 "찾지 못함"과 시도한 질의를 그대로 적는다.
 
 DB 쪽(프로시저·트리거·배치 잡)은 `schema --table` 의 `accessed_by` 와 `schema.json` 의 `db_references`·`scheduled_by` 가 근거다. 인덱스에 없는 DB 객체를 만나고 AX Navi DB 도구가 있으면 `db_dependencies`(누가 이 테이블·패키지를 참조하나, 컴파일러 기준)와 `db_table`(트리거·배치 잡)로 확인한다 — 추정으로 채우지 않는다.
 
@@ -33,6 +35,8 @@ DB 쪽(프로시저·트리거·배치 잡)은 `schema --table` 의 `accessed_by
 - `screen_callers[]` — `verdict`(`breaks` 깨짐 · `reads_by_position` 위치로 읽음 · `reads_by_name` · `unaffected`), `repo/file:line`, `callback`, `reads[]`(무엇을 읽다가 무엇을 읽게 되는지).
 - `code_callers[]` · `methods[].result_keys`(결과를 담는 이름) · `sql[].columns`(SELECT 순서).
 - `truncated > 0` 이면 잘린 것이다 — `limit` 을 올려 전체를 받는다.
+- 클래스를 물었으면 `query.kind: "class"` 와 `summary.internal_calls_excluded`(뺀 클래스 내부 호출 수)가 온다.
+- `callers` 를 쓸 때는 `summary` 를 본다 — `external`(바깥 호출) · `internal`(클래스 안) · `name_only`(이름에 글자만 들어 있는 다른 심볼, 예: `DDA10010` 질의의 `DDA10010P01`). `total` 을 "참조 수" 로 옮기지 않는다 — 영향 범위는 `external` 이다.
 
 ### 2. 원문 표본 검증
 
@@ -42,6 +46,8 @@ DB 쪽(프로시저·트리거·배치 잡)은 `schema --table` 의 `accessed_by
 인덱스가 못 잡는 곳을 한 번 더 본다: 대상 이름(SQL id · 컬럼 · 메서드)을 grep — 동적으로 만든 파라미터 · 다른 파일의 콜백 · 리플렉션. 새로 찾은 곳만 추가한다.
 
 ### 3. 그 밖의 영향 (해당할 때만)
+
+- 화면 · 클래스를 바꾸면 그 화면이 여는 하위 화면(팝업 → 하위 팝업)도 본다 — `trace --id <클래스> --depth 3`. 클래스에 닿으면 그 메서드로 이어 가므로 팝업 트리가 나온다. 이것은 "나를 여는 곳"(영향 범위)과 방향이 반대라, 넘겨주는 값 · 같이 쓰는 쿼리가 바뀔 때만 영향이 있다. 보고에서 따로 나눈다.
 
 - 트랜잭션 경계 — `transaction --id <메서드>`
 - DB 스키마 — `schema --table` (컬럼 추가 · 삭제 · 형식 변경일 때)
@@ -60,7 +66,7 @@ DB 쪽(프로시저·트리거·배치 잡)은 `schema --table` 의 `accessed_by
 
 ## 보고
 
-결론부터, 짧게. **영향받는 곳은 하나도 빼지 않고 나열한다** — impact 목록을 그대로 옮긴다(파일마다 한 줄). 요약 수만 적고 목록을 줄이면 사용자는 나머지를 다시 찾아야 한다.
+결론부터, 짧게. **영향받는 곳은 하나도 빼지 않고 나열한다** — impact 목록을 그대로 옮긴다(파일마다 한 줄). 요약 수만 적고 목록을 줄이면 사용자는 나머지를 다시 찾아야 한다. 어쩔 수 없이 줄였다면(수백 곳) 무엇을 기준으로 골랐는지와 빠진 수를 "인덱스 근거" 줄에 적는다 — 기준 없이 "주요 참조만" 고르지 않는다.
 
 ```
 ## 결론
@@ -68,8 +74,12 @@ DB 쪽(프로시저·트리거·배치 잡)은 `schema --table` 의 `accessed_by
 [깨지는 이유 한 줄 — 예: 결과를 위치로 읽어 한 칸씩 밀린다]
 
 ## 영향받는 곳 (전체 [N])
+인덱스 근거: 바깥 호출자 [N]곳(파일 [n]개) 중 [N]곳 나열 · 클래스 내부 호출 [k]건 제외 · 이름만 비슷한 심볼 [x]건 제외
 - [저장소/파일:줄] [함수/콜백] — [읽는 것 → 바뀐 뒤 읽는 것]
 - …
+
+## 이 화면이 여는 하위 화면 (화면 · 클래스 대상일 때만, 참고)
+- [단계] [클래스] ← [여는 곳 파일:줄]
 
 ## 근거
 SQL [파일:줄] SELECT [순서] · 실행 메서드 [파일:줄] → 결과 이름 [key]
