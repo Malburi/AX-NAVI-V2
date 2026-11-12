@@ -295,4 +295,63 @@ public class MA00001Service {
       assert.ok(!("accessed_by" in COMMANDS.schema({ root, limit: 50 })));
     });
   });
+  /*
+   * 화면(클래스) 단위 질의. 실측(WinForms 321만 줄): 클래스 하나의 callers 가 1,253건으로 나왔는데 대부분 그 클래스 내부 호출과
+   * 이름만 비슷한 팝업(DDA10010P01…)의 호출이었고, impact 는 클래스를 받지 못해 0건, trace 는 `new 팝업()` 에서 멈췄다.
+   */
+  const SCREENS = {
+    _meta: {},
+    nodes: [
+      { id: "ui.Main", type: "class", file: "Main(메인 화면).cs" },
+      { id: "ui.Main.btnPop_Click", type: "method", file: "Main(메인 화면).cs" },
+      { id: "ui.Main.Search", type: "method", file: "Main(메인 화면).cs" },
+      { id: "ui.MainP01", type: "class", file: "MainP01.cs" },
+      { id: "ui.MainP01.btnChild_Click", type: "method", file: "MainP01.cs" },
+      { id: "ui.MainP01P01", type: "class", file: "MainP01P01.cs" },
+      { id: "ui.Menu", type: "class", file: "Menu.cs" },
+      { id: "ui.Menu.open_Click", type: "method", file: "Menu.cs" },
+    ],
+    edges: [
+      { from: "ui.Main.btnPop_Click", to: "ui.MainP01", type: "call", file: "Main(메인 화면).cs", line: 7 },
+      { from: "ui.Main.btnPop_Click", to: "ui.Main.Search", type: "call", file: "Main(메인 화면).cs", line: 9 },
+      { from: "ui.MainP01.btnChild_Click", to: "ui.MainP01P01", type: "call", file: "MainP01.cs", line: 7 },
+      { from: "ui.Menu.open_Click", to: "ui.Main", type: "call", file: "Menu.cs", line: 11 },
+    ],
+  };
+
+  register("callers 는 바깥 호출 · 클래스 내부 호출 · 이름만 비슷한 심볼을 나눠 센다", () => {
+    withIndex({ call_graph: SCREENS }, (root) => {
+      const result = COMMANDS.callers({ root, id: "Main", limit: 50 });
+      assert.equal(result.query.kind, "class");
+      assert.equal(JSON.stringify(result.summary), JSON.stringify({ external: 1, external_files: 1, internal: 1, name_only: 2 }), JSON.stringify(result.items));
+      assert.equal(result.items[0].from, "ui.Menu.open_Click", "바깥 호출이 먼저 온다");
+      assert.ok(result.items.filter((item) => item.match === "name").every((item) => item.to.startsWith("ui.MainP01")));
+    });
+  });
+
+  register("impact 는 클래스를 받아 클래스 안의 호출을 뺀 바깥 호출자를 돌려준다", () => {
+    /* impact 는 _meta.json 이 있는 저장소만 인덱스가 있는 것으로 본다. */
+    withIndex({ _meta: { version: "t" }, call_graph: SCREENS }, (root) => {
+      const result = COMMANDS.impact({ root, id: "Main", limit: 50 });
+      assert.equal(result.query.kind, "class");
+      assert.equal(result.summary.methods, 2);
+      assert.equal(result.summary.code_callers, 1, JSON.stringify(result.code_callers));
+      assert.equal(result.summary.internal_calls_excluded, 1);
+      assert.equal(result.code_callers.items[0].from, "ui.Menu.open_Click");
+      /* 메서드를 물으면 예전처럼 그 메서드만 — 같은 클래스의 호출자도 영향 범위다. */
+      assert.equal(COMMANDS.impact({ root, id: "Main.Search", limit: 50 }).summary.code_callers, 1);
+    });
+  });
+
+  register("trace 는 클래스에 닿으면 그 메서드로 이어 가고, 그 이음은 깊이로 세지 않는다", () => {
+    withIndex({ call_graph: SCREENS }, (root) => {
+      const traced = COMMANDS.trace({ root, id: "Menu.open_Click", depth: 2, limit: 50 });
+      const paths = traced.items.map((item) => item.path.join(" > "));
+      assert.ok(paths.includes("ui.Menu.open_Click > ui.Main > ui.Main.btnPop_Click > ui.MainP01"), JSON.stringify(paths));
+      assert.ok(!paths.some((path) => path.endsWith("ui.MainP01P01")), "depth 2 면 하위 팝업(3단계)은 아직이다");
+      const fromClass = COMMANDS.trace({ root, id: "Main", depth: 2, limit: 50 });
+      assert.equal(fromClass.resolved_start, "ui.Main", "짧은 클래스 이름은 그 클래스에서 시작한다(이름이 비슷한 메서드가 아니라)");
+      assert.ok(fromClass.items.some((item) => item.leaf.to === "ui.MainP01P01"), "메인 → 팝업 → 하위 팝업");
+    });
+  });
 }

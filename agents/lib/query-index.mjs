@@ -122,6 +122,25 @@ function dbObjectsTouching(schemaIndex, table) {
 
 /* `--id`는 전체 id와 마지막 segment 둘 다로 맞춘다 — 에이전트가 짧은 이름으로 물어도 통하게. */
 const idMatches = (id, query) => id === query || String(id).split(".").at(-1) === query || matches(id, query);
+/*
+ * `idMatches` 는 부분 문자열까지 맞춰 `DDA10010` 이 `DDA10010P01`(이름만 비슷한 다른 클래스)까지 끌고 온다.
+ * 실측(WinForms 321만 줄): 클래스 하나의 callers 1,253건이 대부분 그 클래스 내부 호출과 이름이 비슷한 팝업 70개의
+ * 호출이었는데, 에이전트·사용자 모두 "참조 1,253건"으로 읽었다. 맞춘 방식을 구분해 돌려준다.
+ *   exact  — 그 심볼 자체(전체 id 또는 짧은 이름)
+ *   member — 그 클래스의 멤버(`<클래스>.<메서드>`)
+ *   name   — 이름에 글자만 들어 있는 다른 심볼
+ */
+function matchKind(id, query) {
+  const value = String(id);
+  if (value === query || value.endsWith(`.${query}`)) return "exact";
+  if (value.startsWith(`${query}.`) || value.includes(`.${query}.`)) return "member";
+  return matches(value, query) ? "name" : null;
+}
+/* 질의가 가리키는 클래스 id(전체 또는 짧은 이름으로 정확히 맞는 메서드 아닌 노드). */
+function classTargets(nodes, query) {
+  return (nodes || []).filter((node) => node.type !== "method" && node.type !== "function" && node.source !== "external" && (node.id === query || String(node.id).endsWith(`.${query}`))).map((node) => node.id);
+}
+const insideClass = (id, classId) => id === classId || String(id).startsWith(`${classId}.`);
 
 /*
  * 자유 텍스트로 훑을 대상.
@@ -307,10 +326,19 @@ const COMMANDS = {
         for (const item of usage.usages || []) if ((item.sql_id === sqlId || String(item.sql_id).endsWith(`.${sqlId}`)) && item.method && item.method !== "unknown") methodIds.add(item.method);
       }
     }
+    /*
+     * 클래스를 물으면 그 클래스의 메서드 전부와 클래스 자체(`new X()`)를 출발점으로 삼는다.
+     * 예전에는 메서드만 받아 클래스(화면 하나)를 물으면 0건이 났고, 에이전트가 손으로 대충 골라 담았다(WinForms 실측).
+     */
+    const classIds = new Set();
     if (id) {
       for (const r of roots) {
         const graph = tryIndex(r, "call_graph", dirFor(r));
         for (const node of graph?.nodes || []) /* 영향도는 정확히 맞는 메서드만 — 부분 문자열로 맞추면 "list" 가 수천 개를 끌고 온다. */ if (node.type === "method" && (node.id === id || node.id.endsWith(`.${id}`)) && node.source !== "external") methodIds.add(node.id);
+        for (const cls of classTargets(graph?.nodes, id)) {
+          classIds.add(cls);
+          for (const node of graph.nodes) if (node.type === "method" && node.source !== "external" && node.id.startsWith(`${cls}.`)) methodIds.add(node.id);
+        }
       }
     }
     const columns = statements[0]?.columns || [];
@@ -362,6 +390,24 @@ const COMMANDS = {
       }
     }
 
+    /* 클래스 자체를 부르는 곳(`new X()` · 화면 열기)도 코드 호출자다. */
+    for (const cls of classIds) {
+      for (const r of roots) {
+        const graph = tryIndex(r, "call_graph", dirFor(r));
+        for (const edge of graph?.edges || []) if (edge.to === cls && edge.type !== "dispatch") codeCallers.push({ repo: label(r), from: edge.from, type: edge.type, file: edge.file, line: edge.line });
+      }
+    }
+    /* 클래스를 바꿀 때 그 클래스 안의 호출은 영향 범위가 아니라 대상 자체다. 같은 자리를 두 번 세지 않는다. */
+    let internalExcluded = 0;
+    const seenCaller = new Set();
+    const outsideCallers = codeCallers.filter((item) => {
+      if ([...classIds].some((cls) => item.from === cls || item.from.startsWith(`${cls}.`))) { internalExcluded += 1; return false; }
+      const key = `${item.repo}:${item.from}:${item.file}:${item.line}`;
+      if (seenCaller.has(key)) return false;
+      seenCaller.add(key);
+      return true;
+    });
+
     /* 3) 화면 호출자마다 결과 읽기와 컬럼 변경 영향 */
     const shaped = screenCalls.map(({ repo, call, keys }) => {
       const relevant = (call.reads || []).filter((read) => !keys.length || read.key === null || keys.includes(read.key));
@@ -379,18 +425,21 @@ const COMMANDS = {
 
     const files = new Set(shaped.map((item) => `${item.repo}/${item.file}`));
     const notes = [];
-    if (!methodIds.size) notes.push(sqlId ? "이 SQL 을 실행하는 메서드를 인덱스에서 찾지 못했다 — sql 명령으로 사용처를 확인하라." : "메서드를 찾지 못했다 — symbol 명령으로 id 를 확인하라.");
+    if (!methodIds.size && !classIds.size) notes.push(sqlId ? "이 SQL 을 실행하는 메서드를 인덱스에서 찾지 못했다 — sql 명령으로 사용처를 확인하라." : "메서드·클래스를 찾지 못했다 — symbol --name 으로 id 를 확인하라(파일 이름으로 찾으면 괄호·한글이 붙은 실제 파일명과 달라 0건이 날 수 있다).");
+    if (classIds.size) notes.push(`클래스 단위 영향도다 — 메서드 ${methods.length}개와 클래스 자체를 부르는 곳을 모았고, 클래스 안의 호출 ${internalExcluded}건은 뺐다. 이 클래스가 여는 하위 화면은 trace --id <클래스> --depth N 으로 본다.`);
     if (missing.length) notes.push(`인덱스가 없어 보지 못한 저장소: ${missing.join(", ")} — axnavi index build 를 그 저장소에서 먼저 실행하라.`);
     if (roots.length < 2) notes.push("저장소 하나만 봤다. 화면이 다른 저장소에 있으면 pair_config 나 --root 를 더 주어야 화면 호출자가 나온다.");
     if (columnHit && columnHit.index === null) notes.push(`SELECT 목록에서 ${column} 의 위치를 찾지 못했다 — 위치 영향은 계산하지 않았다.`);
     notes.push("화면 호출자는 문자열 디스패치(worker·action 류 파라미터)와 콜백의 결과 읽기에서 뽑았다. 동적으로 만든 파라미터·다른 파일의 콜백은 빠질 수 있으니, 결론 전에 컬럼 이름으로 한 번 더 grep 하라.");
 
     return {
-      query: { sql: sqlId || null, id: id || null, column: column || null },
+      query: { sql: sqlId || null, id: id || null, column: column || null, ...(classIds.size ? { kind: "class", resolved: [...classIds] } : {}) },
       summary: {
         repos: roots.map(label),
         methods: methods.length,
-        code_callers: codeCallers.length,
+        code_callers: outsideCallers.length,
+        code_caller_files: new Set(outsideCallers.map((item) => `${item.repo}/${item.file}`)).size,
+        ...(classIds.size ? { internal_calls_excluded: internalExcluded } : {}),
         screen_call_sites: shaped.length,
         screen_files: files.size,
         breaks_if_column_removed: columnHit && columnHit.index !== null ? shaped.filter((item) => item.verdict === "breaks").length : null,
@@ -399,7 +448,7 @@ const COMMANDS = {
       ...(columnHit ? { column: columnHit } : {}),
       sql: statements.map(({ repo, id: sid, type, file, line, columns: cols }) => ({ repo, id: sid, type, file, line, columns: cols.map((item) => `${item.index}: ${item.name}`) })),
       methods,
-      code_callers: cap(codeCallers, limit),
+      code_callers: cap(outsideCallers, limit),
       screen_callers: cap(shaped, limit),
       notes,
     };
@@ -416,8 +465,29 @@ const COMMANDS = {
   callers({ root, indexDir, id, limit }) {
     if (!id) throw new Error("callers에는 --id가 필요합니다.");
     const graph = loadIndex(root, "call_graph", indexDir);
-    const hits = (graph.edges || []).filter((edge) => idMatches(edge.to, id));
-    return { query: { id }, ...cap(hits.map(({ from, to, type, file, line }) => ({ from, to, type, file, line })), limit) };
+    const classes = classTargets(graph.nodes, id);
+    const hits = [];
+    for (const edge of graph.edges || []) {
+      const match = matchKind(edge.to, id);
+      if (!match) continue;
+      /*
+       * 내부 호출 — 클래스를 물었을 때 그 클래스 안에서 나간 호출. 클래스를 바꿀 때 내부 호출은 영향 범위가 아니라
+       * 바꾸는 대상 그 자체다. 메서드를 물었으면 같은 클래스의 호출자도 영향을 받으므로 나누지 않는다.
+       */
+      const internal = match !== "name" && classes.some((cls) => insideClass(edge.from, cls));
+      hits.push({ from: edge.from, to: edge.to, type: edge.type, file: edge.file, line: edge.line, match, ...(internal ? { internal: true } : {}) });
+    }
+    const rank = (item) => (item.match === "name" ? 2 : item.internal ? 1 : 0);
+    hits.sort((a, b) => rank(a) - rank(b));
+    const external = hits.filter((item) => rank(item) === 0);
+    const summary = {
+      external: external.length,
+      external_files: new Set(external.map((item) => item.file)).size,
+      internal: hits.filter((item) => rank(item) === 1).length,
+      name_only: hits.filter((item) => rank(item) === 2).length,
+    };
+    return { query: { id, ...(classes.length ? { kind: "class", resolved: classes } : {}) }, summary, ...cap(hits, limit),
+      ...(summary.name_only ? { notes: [`name_only ${summary.name_only}건은 이름에 '${id}' 글자만 들어 있는 다른 심볼(예: ${id}P01)을 부르는 곳이다 — 영향 범위로 세지 않는다.`] } : {}) };
   },
 
   /* 이 심볼이 무엇을 부르는가 */
@@ -446,7 +516,25 @@ const COMMANDS = {
     try { endpoints = loadIndex(root, "api_contract", indexDir).endpoints || []; } catch { /* API 가 없는 저장소 */ }
     const endpoint = byFrom.has(id) ? null : endpoints.find((item) => item.handler && (item.id === id || `${item.method} ${item.path_pattern}` === id || `${item.method} ${item.path}` === id));
     const target = endpoint?.handler || id;
-    const start = [...byFrom.keys()].find((key) => key === target) || [...byFrom.keys()].find((key) => idMatches(key, target));
+    /*
+     * 클래스와 그 메서드 잇기. `new Popup()` 같은 호출은 클래스 노드로 가는데, 그다음 호출은 그 클래스의 메서드에서 나간다.
+     * 둘이 이어져 있지 않아 trace 가 클래스에서 멈췄다(WinForms 메인 → 팝업 → 하위 팝업, Java 도 같다).
+     * 화면 메서드는 대부분 프레임워크가 부르므로(버튼 이벤트 등) 클래스에 닿으면 그 메서드들로 이어 간다.
+     * 이 이음(`member`)은 호출이 아니라 소속이라 깊이로 세지 않는다 — depth 는 "화면을 몇 단계 열었나" 로 읽힌다.
+     */
+    const graphNodes = loadIndex(root, "call_graph", indexDir).nodes || [];
+    const classIds = new Set(graphNodes.filter((node) => node.type !== "method" && node.type !== "function").map((node) => node.id));
+    const membersOf = new Map();
+    for (const node of graphNodes) {
+      if (node.type !== "method") continue;
+      const owner = node.id.split(".").slice(0, -1).join(".");
+      if (!classIds.has(owner) || !byFrom.has(node.id)) continue;
+      const bucket = membersOf.get(owner);
+      if (bucket) bucket.push(node.id);
+      else membersOf.set(owner, [node.id]);
+    }
+    const start = [...byFrom.keys()].find((key) => key === target) || (membersOf.has(target) ? target : null)
+      || [...membersOf.keys()].find((key) => key.endsWith(`.${target}`)) || [...byFrom.keys()].find((key) => idMatches(key, target)) || null;
     const paths = [];
     const seen = new Set();
     const walk = (node, trail, level) => {
@@ -458,6 +546,7 @@ const COMMANDS = {
         paths.push({ depth: level, path: [start, ...next.map((step) => step.to)], leaf: next.at(-1) });
         walk(edge.to, next, level + 1);
       }
+      for (const member of membersOf.get(node) || []) walk(member, [...trail, { to: member, type: "member" }], level);
     };
     if (start) walk(start, [], 1);
     /* 경로에 XML 빈이 나오면 그 정의를 함께 준다 — 프레임워크 클래스의 동작은 설정(property)에만 있다. */
