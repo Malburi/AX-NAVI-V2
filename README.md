@@ -6,7 +6,7 @@
 
 ITO/SI/SM 현장을 위한 Claude Code 플러그인 — 코드베이스 지도를 먼저 만들고, 그 지도를 근거로 찾고 · 따라가고 · 고칩니다.
 
-[![version](https://img.shields.io/badge/version-0.3.13-0F7B85)](docs/changelog.md)
+[![version](https://img.shields.io/badge/version-0.3.14-0F7B85)](docs/changelog.md)
 [![license](https://img.shields.io/badge/license-MIT-blue)](#라이선스)
 [![node](https://img.shields.io/badge/node-%E2%89%A518-339933)](#요구-사항)
 [![platform](https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-555)](#설치)
@@ -97,7 +97,7 @@ Claude Code 안에서 한 번만 합니다.
 - [지원 스택](#지원-스택)
 - [구성](#구성)
 
-현재 버전 **0.3.13**
+현재 버전 **0.3.14**
 
 ---
 
