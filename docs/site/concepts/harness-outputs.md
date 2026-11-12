@@ -121,7 +121,7 @@ writer는 이 파일을 마크다운으로 직접 쓰지 않는다. `_workspace/
 | 참조용 보관 | `_workspace/01_analyzer_report.md` 등 리포트 | 커밋해도 되지만 `domain-expert.md`에 같은 내용이 있다 |
 | 무시 권장 | `.claude/backup/`, `_workspace_prev/`, `_workspace/wiki/`, `_workspace/wiki_prev/`, `_workspace/reports/` | 백업·재생성 가능 산출물·개인 작업 리포트 |
 
-`.gitignore`에 `_workspace/`를 통째로 넣으면 `_ai_patch.json`까지 버려진다. harness-init은 Phase 3 보고에서 이 파일이 무시 규칙에 걸려 있지 않은지 확인시킨다. 인덱스를 커밋하지 않기로 했다면 다음처럼 예외를 둔다.
+`.gitignore`에 `_workspace/`를 통째로 넣으면 `_ai_patch.json`까지 버려진다. harness-init은 Phase 3.4에서 `.gitignore`가 권장 정책과 맞는지 판정하고, 어긋나면 권장 블록(`_workspace/*` + `_ai_patch.json` 예외, 백업 제외)을 넣을지 한 번 묻는다. 인덱스를 커밋하지 않기로 했다면 다음처럼 예외를 둔다.
 
 ```gitignore
 .claude/backup/

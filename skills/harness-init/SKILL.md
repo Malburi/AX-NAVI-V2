@@ -656,6 +656,40 @@ HIGH 우선순위 항목이 있으면 사용자에게 명시적 안내. 자동 �
 
 ---
 
+## Phase 3.4: .gitignore 정리
+
+초기화 산출물 중 팀과 공유할 것(`CLAUDE.md`·`.claude/` 하네스 파일·`_workspace/index/_ai_patch.json`)과 뺄 것(중간 산출물·백업)을 프로젝트 `.gitignore`에 맞춰 둔다. 초기 실행·재초기화에서만 하고, 부분 재실행·인덱스 리프레시에서는 건너뛴다. 분리 저장소는 대상 루트마다 판정하되 질문은 1회로 묶는다.
+
+**권장 규칙 블록** (표식 줄 포함 그대로 쓴다):
+
+```gitignore
+# AX-NAVI 하네스 산출물 (harness-init 이 추가)
+.claude/backup/
+_workspace_prev/
+_workspace/*
+!_workspace/index/
+_workspace/index/*
+!_workspace/index/_ai_patch.json
+```
+
+1. `git -C "[루트]" rev-parse --show-toplevel`이 실패하면(git 저장소가 아님) 이 Phase 를 건너뛴다. 결과가 루트와 다르면(상위 저장소의 하위 폴더) 규칙 경로를 그 상대 위치에 맞춰 접두사를 붙인다.
+2. `git check-ignore -q`로 아래를 판정한다. 모두 기대대로면 묻지 않고 "`.gitignore` 이미 정리됨" 한 줄만 보고한다.
+   - 제외돼야 함: `.claude/backup/x`, `_workspace_prev/x`, `_workspace/01_analyzer_report.md`
+   - 포함돼야 함: `CLAUDE.md`, `.claude/skills/trace.md`, `_workspace/index/_ai_patch.json`
+3. 하나라도 어긋나면 `AskUserQuestion` 1회(header: `gitignore`, 한국어). 본문에 어긋난 항목과 위 블록을 보여 준다.
+   - `추가 (Recommended)`: 권장 규칙을 프로젝트 `.gitignore`에 넣습니다. 커밋은 하지 않습니다.
+   - `안 함`: 그대로 둡니다. 나중에 직접 넣을 수 있도록 블록을 보고에 남깁니다.
+   - 무응답·답할 사람이 없는 실행이면 바꾸지 않고 블록만 보고한다(파일을 고치는 일이라 기본값으로 실행하지 않는다).
+4. `추가`를 고르면 다음을 지킨다.
+   - 루트의 `.gitignore` 끝에 블록을 붙인다(없으면 만든다). 표식 줄이 이미 있으면 그 블록을 위 내용으로 바꾸고 중복으로 붙이지 않는다. 기존 파일의 줄바꿈(CRLF/LF)과 인코딩을 따른다.
+   - 기존에 `_workspace/`·`_workspace`·`/_workspace/` 줄이 있으면 디렉터리째 제외돼 `!` 예외가 먹지 않는다(`_ai_patch.json`이 계속 제외됨). 그 줄을 지우고 블록으로 대신하며, 지운 줄을 보고에 적는다.
+   - `CLAUDE.md`나 `.claude/` 전체를 제외하는 기존 규칙은 팀 결정일 수 있으므로 고치지 않는다. 대신 "팀원이 하네스를 pull 로 받을 수 없음"을 경고한다.
+   - 적용 후 2번 판정을 다시 돌려 결과를 보고한다.
+5. `git ls-files _workspace .claude/backup _workspace_prev`에 이미 추적 중인 파일이 있으면(`_ai_patch.json`과 인덱스 제외) `.gitignore`만으로는 빠지지 않는다. `git rm -r --cached <경로>` 명령을 안내만 하고 실행하지 않는다.
+6. 커밋·스테이징은 하지 않는다. 어떤 파일을 커밋하면 되는지(`CLAUDE.md`, `.claude/`, `.gitignore`, `_workspace/index/_ai_patch.json`)만 안내한다.
+
+---
+
 ## Phase 3.5: 파트너 연동 (P-BARRIER → P-PAIR → P-REFRESH)
 
 **Phase -1 결과 및 기존 설정 기반 분기:**
@@ -710,7 +744,7 @@ HIGH 우선순위 항목이 있으면 사용자에게 명시적 안내. 자동 �
 
 `_workspace/03_validator_report.md` 신뢰도 < 50이면 `경계 QA` 옵션의 `description` 끝에 "— 구조 검증 실패로 결과 없이 종료됨"을 덧붙여 표시한다(선택해도 미실행 사유만 기록).
 
-> Phase 3.5(파트너 연동 — P-BARRIER/P-PAIR/P-REFRESH, 대부분 질문 없이 자동 진행) → Phase 3.6(이 메뉴) → Phase 3.7(선택된 것만 실행) 순서다. 파트너 연동이 실패해 단독 상태로 왔으면 wiki 두 옵션의 `description`에 "파트너 병합 없이 단독 wiki로 생성됨"을 덧붙인다.
+> Phase 3.4(.gitignore 정리, 어긋날 때만 질문 1회) → Phase 3.5(파트너 연동 — P-BARRIER/P-PAIR/P-REFRESH, 대부분 질문 없이 자동 진행) → Phase 3.6(이 메뉴) → Phase 3.7(선택된 것만 실행) 순서다. 파트너 연동이 실패해 단독 상태로 왔으면 wiki 두 옵션의 `description`에 "파트너 병합 없이 단독 wiki로 생성됨"을 덧붙인다.
 
 ---
 

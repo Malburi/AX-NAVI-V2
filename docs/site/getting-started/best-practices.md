@@ -96,14 +96,19 @@ node "$env:CLAUDE_PLUGIN_ROOT/agents/lib/build-index.mjs" --root "D:\work\order-
 | 경로 | 권장 | 이유 |
 |------|------|------|
 | `CLAUDE.md`, `.claude/skills/`, `.claude/agents/domain-expert.md`, `.claude/patterns/`, `.claude/ito-guide.md` | 커밋 | LLM 산출물이며 팀원이 pull하면 초기화 없이 바로 사용 |
-| `.claude/backup/` | gitignore | 재초기화 전 백업 |
+| `.claude/backup/`, `_workspace_prev/` | gitignore | 재초기화 전 백업 |
 | `_workspace/` (리포트·wiki 등) | gitignore | 재생성 가능한 런타임 산출물 |
 | `_workspace/index/*.json` (기계 인덱스) | 팀 결정 | 이식 가능(상대경로·슬래시 정규화·줄바꿈 무관)하므로 커밋하면 팀원은 인덱싱조차 생략. 크기가 부담이면 커밋하지 않아도 팀원이 수십 초짜리 인덱싱 한 번만 더 함 |
 | `_workspace/index/_ai_patch.json` | 반드시 보존 | analyzer가 미해결 관계를 판정한 LLM 결과. 다시 만들려면 분석을 다시 돌려야 함 |
 
-`.gitignore`에 `_workspace/`를 통째로 넣으면 `_ai_patch.json`도 함께 버려집니다. 초기화 Phase 3 보고가 이 점을 확인하라고 안내하니, 예외 규칙을 두거나 wiki-hub DB 발행을 대체 경로로 삼으세요. DB에 발행돼 있으면 `publish-wiki --pull`이 인덱스와 `_ai_patch.json`을 복원하며, 순서는 반드시 pull → `--check-stale`입니다.
+하네스 초기화는 끝날 때(Phase 3.4) 프로젝트 `.gitignore`가 이 표와 맞는지 확인하고, 어긋나면 아래 규칙을 넣을지 한 번 묻습니다. 승인해야만 파일을 고치고, 커밋은 하지 않습니다.
+
+`.gitignore`에 `_workspace/`를 통째로 넣으면 `_ai_patch.json`도 함께 버려집니다. 위 단계에서 규칙을 넣으면 그 줄을 아래 블록으로 바꿉니다. 직접 관리한다면 예외 규칙을 두거나 wiki-hub DB 발행을 대체 경로로 삼으세요. DB에 발행돼 있으면 `publish-wiki --pull`이 인덱스와 `_ai_patch.json`을 복원하며, 순서는 반드시 pull → `--check-stale`입니다.
 
 ```gitignore
+# AX-NAVI 하네스 산출물 (harness-init 이 추가)
+.claude/backup/
+_workspace_prev/
 _workspace/*
 !_workspace/index/
 _workspace/index/*
